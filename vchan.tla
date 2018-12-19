@@ -26,6 +26,13 @@ by the client. The algorithm described here provides reliable lockfree operation
 allowing the sender and receiver to write to and read from the buffer at the same
 time without risk of data corruption or deadlock.
 
+I believe that the C implementation implements this algorithm except for one detail:
+when the sender closes the connection (and the receiver doesn't) this version
+ensures that all data already transmitted will be received. My assumption is that
+this is simply a bug in the C implementation, but perhaps it was intentional.
+I have no special information about the design of the protocol; I just read the
+code and made guesses.
+
 The C implementation can be used in blocking or non-blocking mode. I believe this
 algorithm covers both cases, depending on whether you consider the blocking states
 to be part of the library or part of the application.
@@ -139,7 +146,10 @@ SpuriousID       == "SP"   \* Spurious interrupts from the other channel
       If the NotifyRead flag is set, we clear it and notify the receiver of the new space.
       We return success to the application (even if we didn't get as much as requested).
    5. Otherwise, we check whether the sender has closed the connection.
-   6. If not (if the connection is still open), we wait to be notified of more data
+      If it has, we check the buffer again in case data was added after we checked.
+      If the buffer is still empty, we abort.
+      If there is now data available, we go back to step 2 to read it.
+   6. Otherwise (if the connection is still open), we wait to be notified of more data
       and go back to 2.
 
    Either side can close the connection by clearing their "live" flag and signalling
@@ -276,7 +286,9 @@ recv_notify_read:           SpaceAvailableInt := TRUE;
                             goto recv_ready;          \* Return success
                           } else goto recv_ready;     \* Return success
                         } else if (~SenderLive \/ ~ReceiverLive) {
-                          goto Done;
+                          \* (see note 2)
+recv_final_check:         if (Len(Buffer) = 0) { want := 0; goto Done }
+                          else goto recv_reading;
                         };
 recv_await_data:        await DataReadyInt \/ ~ReceiverLive;
                         if (~ReceiverLive) { want := 0; goto Done }
@@ -314,6 +326,10 @@ recv_await_data:        await DataReadyInt \/ ~ReceiverLive;
    will just give us a buffer big enough for the largest possible message and be happy
    with whatever actual message we return. Therefore, it would probably be better to
    set the flag here only if there is no data at all.
+
+   Note 2:
+   The C code doesn't do the recv_final_check check, but that presumably means that it
+   might not read all of the client's data.
 
    Note on formatting:
    TLA's PDF rendering gets the indentation wrong if you put a semicolon after a closing brace,
@@ -512,7 +528,7 @@ recv_read_data == /\ pc[ReceiverReadID] = "recv_read_data"
                              /\ have' = 0
                              /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_check_notify_read"]
                         ELSE /\ IF ~SenderLive \/ ~ReceiverLive
-                                   THEN /\ pc' = [pc EXCEPT ![ReceiverReadID] = "Done"]
+                                   THEN /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_final_check"]
                                    ELSE /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_await_data"]
                              /\ UNCHANGED << Buffer, have, want, Got >>
                   /\ UNCHANGED << SenderLive, ReceiverLive, NotifyWrite, 
@@ -537,6 +553,17 @@ recv_notify_read == /\ pc[ReceiverReadID] = "recv_notify_read"
                                     NotifyWrite, DataReadyInt, NotifyRead, 
                                     free, msg, Sent, have, want, Got >>
 
+recv_final_check == /\ pc[ReceiverReadID] = "recv_final_check"
+                    /\ IF Len(Buffer) = 0
+                          THEN /\ want' = 0
+                               /\ pc' = [pc EXCEPT ![ReceiverReadID] = "Done"]
+                          ELSE /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_reading"]
+                               /\ want' = want
+                    /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, 
+                                    NotifyWrite, DataReadyInt, NotifyRead, 
+                                    SpaceAvailableInt, free, msg, Sent, have, 
+                                    Got >>
+
 recv_await_data == /\ pc[ReceiverReadID] = "recv_await_data"
                    /\ DataReadyInt \/ ~ReceiverLive
                    /\ IF ~ReceiverLive
@@ -553,7 +580,7 @@ recv_await_data == /\ pc[ReceiverReadID] = "recv_await_data"
 ReceiverRead == recv_ready \/ recv_reading \/ recv_got_len
                    \/ recv_recheck_len \/ recv_read_data
                    \/ recv_check_notify_read \/ recv_notify_read
-                   \/ recv_await_data
+                   \/ recv_final_check \/ recv_await_data
 
 recv_open == /\ pc[ReceiverCloseID] = "recv_open"
              /\ ReceiverLive' = FALSE
