@@ -197,8 +197,8 @@ SpuriousID       == "SP"   \* Spurious interrupts from the other channel
        has been written to the buffer. The sender checks it after adding data. If set, the sender
        clears the flag and notifies the receiver using the event channel. This is represented by
        DataReadyInt being set to TRUE. It becomes FALSE when the receiver handles the event.
-       I'm not sure why NotifyWrite is initialised to TRUE, but that's what the C code does.
-       It may be a backwards-compatibility hack for e.g. QubesDB. *)
+       NotifyWrite is initialised to TRUE to support some programs (e.g. QubedDB) that block first,
+       before checking the buffer state. *)
     NotifyWrite = TRUE,       \* Set by receiver, cleared by sender
     DataReadyInt = FALSE,     \* Set by sender, cleared by receiver
 
@@ -268,6 +268,11 @@ sender_check_recv_live:   if (~ReceiverLive) goto Done;
             want = 0,     \* The amount of data the user wants us to read.
             Got = << >>;  \* Pseudo-variable recording all data ever received by receiver.
   {
+recv_init:          either goto recv_ready        \* (recommended)
+                    or {    \* (QubesDB does this)
+                      with (n \in 1..MaxReadLen) want := n;
+                      goto recv_await_data;
+                    };
 recv_ready:         while (ReceiverLive) {
                       with (n \in 1..MaxReadLen) want := n;
 recv_reading:         while (TRUE) {
@@ -365,7 +370,7 @@ Init == (* Global variables *)
         /\ Got = << >>
         /\ pc = [self \in ProcSet |-> CASE self = SenderWriteID -> "sender_ready"
                                         [] self = SenderCloseID -> "sender_open"
-                                        [] self = ReceiverReadID -> "recv_ready"
+                                        [] self = ReceiverReadID -> "recv_init"
                                         [] self = ReceiverCloseID -> "recv_open"
                                         [] self = SpuriousID -> "spurious"]
 
@@ -484,6 +489,16 @@ sender_notify_closed == /\ pc[SenderCloseID] = "sender_notify_closed"
 
 SenderClose == sender_open \/ sender_notify_closed
 
+recv_init == /\ pc[ReceiverReadID] = "recv_init"
+             /\ \/ /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_ready"]
+                   /\ want' = want
+                \/ /\ \E n \in 1..MaxReadLen:
+                        want' = n
+                   /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_await_data"]
+             /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, NotifyWrite, 
+                             DataReadyInt, NotifyRead, SpaceAvailableInt, free, 
+                             msg, Sent, have, Got >>
+
 recv_ready == /\ pc[ReceiverReadID] = "recv_ready"
               /\ IF ReceiverLive
                     THEN /\ \E n \in 1..MaxReadLen:
@@ -577,7 +592,7 @@ recv_await_data == /\ pc[ReceiverReadID] = "recv_await_data"
                                    NotifyWrite, NotifyRead, SpaceAvailableInt, 
                                    free, msg, Sent, have, Got >>
 
-ReceiverRead == recv_ready \/ recv_reading \/ recv_got_len
+ReceiverRead == recv_init \/ recv_ready \/ recv_reading \/ recv_got_len
                    \/ recv_recheck_len \/ recv_read_data
                    \/ recv_check_notify_read \/ recv_notify_read
                    \/ recv_final_check \/ recv_await_data
