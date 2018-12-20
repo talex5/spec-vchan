@@ -789,6 +789,12 @@ IntegrityI ==
   /\ free <= BufferSize - Len(Buffer)
   /\ pc[SenderWriteID] \in {"sender_write", "sender_request_notify", "sender_recheck_len",
                             "sender_write_data", "sender_blocked", "sender_check_recv_live"} => msg /= << >>
+  \* If we're at a point in the code where the variable `want' (the number of bytes the receiving
+  \* application wants to read) is active, it can't be zero. Otherwise, it is always zero.
+  /\ want = 0 <=> pc[ReceiverReadID] \in {"recv_check_notify_read", "recv_notify_read",
+                                       "recv_init", "recv_ready", "recv_notify_read", "Done"}
+  \* `have' is only used in these states:
+  /\ pc[ReceiverReadID] \in {"recv_got_len", "recv_recheck_len", "recv_read_data"} \/ have = 0
 
 (* For deadlock / liveness properties, the key idea is (roughly):
    - Whenever NotifyRead is set, the sender's information is still accurate.
@@ -856,12 +862,6 @@ NotifyFlagsCorrect ==
    - If the notify flags are still set, the information is still up-to-date. *)
 I ==
   /\ IntegrityI
-  \* If we're at a point in the code where the variable `want' (the number of bytes the receiving
-  \* application wants to read) is active, it can't be zero. Otherwise, it is always zero.
-  /\ want = 0 <=> pc[ReceiverReadID] \in {"recv_check_notify_read", "recv_notify_read",
-                                       "recv_init", "recv_ready", "recv_notify_read", "Done"}
-  \* `have' is only used in these states:
-  /\ pc[ReceiverReadID] \in {"recv_got_len", "recv_recheck_len", "recv_read_data"} \/ have = 0
   \* An endpoint is live iff its close thread hasn't done anything:
   /\ pc[SenderCloseID] = "sender_open" <=> SenderLive
   /\ pc[ReceiverCloseID] = "recv_open" <=> ReceiverLive
@@ -1344,7 +1344,8 @@ LEMMA ReceiverReadPreservesI ==
               <4> QED BY DEF NotifyFlagsCorrect, I
           <3> CASE have >= want
               \* We're not going to block, so no need to set the flag.
-              BY want /= 0 DEF I, NotifyFlagsCorrect, TypeOK
+              <4> want /= 0 BY DEF IntegrityI
+              <4> QED BY DEF I, NotifyFlagsCorrect, TypeOK
           <3> QED BY DEF TypeOK
       <2> ASSUME NotifyWrite'
           PROVE  \/ ReaderInfoAccurate'
@@ -1355,7 +1356,7 @@ LEMMA ReceiverReadPreservesI ==
       <2> USE <1>4 DEF recv_recheck_len
       <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >> BY DEF PCOK
       <2> pc'[ReceiverReadID] = "recv_read_data" BY DEF PCOK
-      <2> want \in 1..MaxReadLen BY LengthFacts DEF I
+      <2> want \in 1..MaxReadLen BY LengthFacts DEF IntegrityI
       <2> have' \in 0..BufferSize BY LengthFacts, have' >= 0 DEF Min
       <2> TypeOK' BY DEF TypeOK
       <2> PCOK' BY DEF PCOK
@@ -1371,7 +1372,7 @@ LEMMA ReceiverReadPreservesI ==
       <2> /\ TypeOK'
           /\ UNCHANGED (Got \o Buffer)
           /\ Len(Buffer') < Len(Buffer)
-          <3> want >= 1 BY DEF I, TypeOK
+          <3> want >= 1 BY DEF IntegrityI, TypeOK
           <3> len \in 1..Len(Buffer) BY DEF IntegrityI, TypeOK, Min
           <3> TransferResults(Buffer, Buffer', Got, Got', len)
               <4> Got' = Got \o Take(Buffer, len) OBVIOUS
@@ -1390,7 +1391,7 @@ LEMMA ReceiverReadPreservesI ==
       <2> IntegrityI'
         <3> free <= BufferSize - Len(Buffer') BY BufferSizeType DEF TypeOK, IntegrityI
         <3> QED BY DEF IntegrityI
-      <2> want /= 0 BY DEF I, TypeOK
+      <2> want /= 0 BY DEF IntegrityI, TypeOK
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
       <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
 <1>5b. CASE recv_read_data /\ have = 0
@@ -1546,7 +1547,7 @@ THEOREM DeadlockFree1 ==
 <1> CASE ~NotifyRead BY DEF NotifyFlagsCorrect
 <1> CASE ~NotifyWrite
     <2> have /= 0 BY DEF NotifyFlagsCorrect
-    <2> QED BY DEF I
+    <2> QED BY DEF IntegrityI, I
 <1> CASE NotifyRead /\ NotifyWrite
     <2> SenderInfoAccurate /\ ReaderInfoAccurate BY DEF I
     <2> Len(Buffer) = BufferSize BY DEF SenderInfoAccurate
@@ -1564,7 +1565,7 @@ THEOREM DeadlockFree2 ==
 <1> NotifyFlagsCorrect BY DEF I
 <1> CASE ~NotifyWrite
     <2> have /= 0 BY DEF NotifyFlagsCorrect
-    <2> QED BY DEF I
+    <2> QED BY DEF I, IntegrityI
 <1> CASE NotifyWrite
     <2> ReaderInfoAccurate BY DEF I
     <2> Len(Buffer) = 0 BY DEF ReaderInfoAccurate
