@@ -60,6 +60,7 @@ This specification is organised as follows:
 4. How to check the properties using TLC.
 5. Inductive invariants for Integrity and deadlock freedom.
 6. Proofs of the above.
+7. Some additional proofs (`ReadLimit` and `WriteLimit`).
 
 -- Thomas Leonard, 2018
 
@@ -807,6 +808,9 @@ IntegrityI ==
                                        "recv_init", "recv_ready", "recv_notify_read", "Done"}
   \* `have' is only used in these states:
   /\ pc[ReceiverReadID] \in {"recv_got_len", "recv_recheck_len", "recv_read_data"} \/ have = 0
+  \* `free` is only used in these states:
+  /\ pc[SenderWriteID] \in {"sender_write", "sender_request_notify", "sender_recheck_len",
+                            "sender_write_data"} \/ free = 0
 
 (* For deadlock / liveness properties, the key idea is (roughly):
    - Whenever NotifyRead is set, the sender's information is still accurate.
@@ -815,8 +819,8 @@ IntegrityI ==
 (* The sender's information is accurate if whenever it is going to block, the buffer
    really is full. *)
 SenderInfoAccurate ==
-  \* The buffer really is full:
-  \/ Len(Buffer) = BufferSize
+  \* We have accurate information:
+  \/ Len(Buffer) + free = BufferSize
   \* In these states, we're going to check the buffer before blocking:
   \/ pc[SenderWriteID] \in {"sender_ready", "sender_request_notify", "sender_write",
                             "sender_recheck_len", "sender_check_recv_live", "Done"}
@@ -825,8 +829,7 @@ SenderInfoAccurate ==
   \/ SpaceAvailableInt
   \* We're about to write some data:
   \/ /\ pc[SenderWriteID] \in {"sender_write_data"}
-     /\ \/ free >= Len(msg)                \* We won't need to block
-        \/ Len(Buffer) + free = BufferSize \* free is still correct
+     /\ free >= Len(msg)                \* We won't need to block
   \* If we wrote all the data we intended to, we'll return without blocking:
   \/ /\ pc[SenderWriteID] \in {"sender_check_notify_data", "sender_notify_data"}
      /\ Len(msg) = 0
@@ -1130,6 +1133,7 @@ LEMMA SenderWritePreservesI ==
               <4> QED BY free' >= free, free' >= Len(msg)
           <3> QED BY DEF TypeOK
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
+      <2> Len(Buffer) + free' = BufferSize BY LengthFacts, BufferSizeType DEF TypeOK
       <2> SenderInfoAccurate' BY LengthFacts DEF SenderInfoAccurate
       <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>5a. CASE sender_write_data /\ free > 0
@@ -1208,8 +1212,7 @@ LEMMA SenderWritePreservesI ==
           PROVE  \/ SenderInfoAccurate'
                  \/ pc[ReceiverReadID] \in {"recv_check_notify_read"}
           \* If NotifyRead was set, then our information is still accurate.
-          <3> \/ Len(Buffer) = BufferSize
-              \/ SpaceAvailableInt
+          <3> \/ SpaceAvailableInt
               \/ free >= Len(msg)
               \/ Len(Buffer) + free = BufferSize
               \/ pc[ReceiverReadID] \in {"recv_check_notify_read"}
@@ -1232,6 +1235,7 @@ LEMMA SenderWritePreservesI ==
               \* The buffer is now full, and we are correct to block.
               <4> len = free BY DEF Min, TypeOK
               <4> Len(Buffer') = BufferSize OBVIOUS
+              <4> free' = 0 OBVIOUS
               <4> QED BY DEF SenderInfoAccurate
           <3> QED BY DEF SenderInfoAccurate, TypeOK
       <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
@@ -1564,6 +1568,7 @@ THEOREM DeadlockFree1 ==
     <2> QED BY DEF IntegrityI, I
 <1> CASE NotifyRead /\ NotifyWrite
     <2> SenderInfoAccurate /\ ReaderInfoAccurate BY DEF I
+    <2> free = 0 BY DEF IntegrityI, I
     <2> Len(Buffer) = BufferSize BY DEF SenderInfoAccurate
     <2> Len(Buffer) = 0 BY DEF ReaderInfoAccurate
     <2> QED BY BufferSizeType
@@ -1711,7 +1716,7 @@ THEOREM ReceiverReadPreservesReadLimit ==
             recv_recheck_len, recv_read_data,
             recv_check_notify_read, recv_notify_read,
             recv_await_data, recv_final_check
-    <2>1. CASE recv_final_check BY <2>1 DEF recv_final_check, TypeOK, ReadLimit 
+    <2>1. CASE recv_final_check BY <2>1 DEF recv_final_check, TypeOK, ReadLimit
     <2>2. CASE recv_reading \/ recv_check_notify_read \/ recv_notify_read
           <4> USE <2>2
           <4> USE DEF ReadLimit, recv_ready, recv_reading,
@@ -1795,7 +1800,7 @@ THEOREM ReadLimitMonotonic ==
     <2> UNCHANGED << Got, Buffer >>
         BY DEF ReceiverClose, recv_open, recv_notify_closed, PCOK
     <2> QED BY UNCHANGED ReadLimit DEF ReadLimit
-<1>5. CASE SpuriousInterrupts 
+<1>5. CASE SpuriousInterrupts
     <2> USE <1>5 DEF spurious
     <2> spurious BY DEF SpuriousInterrupts
     <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverReadID] >> BY DEF PCOK
@@ -1810,6 +1815,495 @@ THEOREM ReadLimitMonotonic ==
         <3> QED BY DEF PCOK
     <2> QED OBVIOUS
 <1>6. CASE UNCHANGED vars BY <1>6 DEF ReadLimit, vars
+<1> QED BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6 DEF Next
+
+-----------------------------------------------------------------------------
+
+\* WriteLimit
+
+(* The number of bytes that the sender will eventually send without further action
+   from the other processes or the client application, assuming the connection isn't
+   closed by either end. *)
+WriteLimit ==
+  LET PC == pc[SenderWriteID] IN
+  LET current == Len(Got) + Len(Buffer) IN
+  IF SenderInfoAccurate THEN Len(Got) + Min(BufferSize, Len(Buffer) + Len(msg))
+  ELSE
+    CASE PC \in {"sender_write_data"} ->
+                current + free  \* Will write and block
+      [] PC \in {"sender_check_notify_data", "sender_notify_data", "sender_blocked"} ->
+                current         \* Will block
+
+(* If WriteLimit says we will send some amount of data then we will eventually send
+   at least that much data (or close the connection).
+   This should be checked without weak fairness (so just I /\ [][Next]_vars). *)
+WriteLimitCorrect ==
+  /\ WF_vars(SenderWrite) =>
+      \A i \in AvailabilityNat :
+        WriteLimit = i ~> Len(Got) + Len(Buffer) >= i \/ ~SenderLive \/ ~ReceiverLive
+  \* WriteLimit can only decrease if we decide to shut down:
+  /\ [][WriteLimit' >= WriteLimit \/ pc'[SenderWriteID] = "Done"]_vars
+  \* SenderWrite steps don't change the write limit, except at sender_ready
+  \* when the application decides to send more data:
+  /\ [][SenderWrite => \/ UNCHANGED WriteLimit
+                       \/ pc[SenderWriteID] \in {"sender_ready"}
+                       \/ pc'[SenderWriteID] \in {"Done"}]_vars
+
+(* Whenever the receiver is blocked, the sender will fill the buffer (or write everything
+   it wants to write) without further action from any other process. *)
+THEOREM WriteAllIfReceiverBlocked ==
+  ASSUME I, SenderLive, ReceiverLive,
+         pc[ReceiverReadID] = "recv_await_data", ~DataReadyInt
+  PROVE  WriteLimit = Len(Got) + Min(BufferSize, Len(Buffer) + Len(msg))
+<1> IntegrityI BY DEF I
+<1> PCOK BY DEF IntegrityI
+<1> TypeOK BY DEF IntegrityI
+<1> CloseOK BY DEF I
+<1> NotifyFlagsCorrect BY DEF I
+<1> pc[SenderWriteID] \in {"sender_ready", "sender_write", "sender_request_notify",
+                           "sender_recheck_len", "sender_write_data", "sender_blocked",
+                           "sender_check_notify_data", "sender_notify_data",
+                           "sender_check_recv_live", "Done"}
+    BY DEF PCOK
+<1> CASE SpaceAvailableInt BY DEF SenderInfoAccurate, WriteLimit, CloseOK, PCOK
+<1> CASE NotifyRead /\ ~SpaceAvailableInt
+    <3> SenderInfoAccurate BY DEF I
+    <3> QED BY DEF WriteLimit
+<1> CASE ~NotifyRead /\ ~SpaceAvailableInt
+    <3> /\ pc[SenderWriteID] \in {"sender_recheck_len", "sender_write_data"}
+           => free >= Len(msg)
+        /\ pc[SenderWriteID] \in {"sender_check_notify_data", "sender_notify_data"}
+           => Len(msg) <= 0
+        /\ pc[SenderWriteID] \notin {"sender_blocked"}
+        BY DEF NotifyFlagsCorrect, TypeOK
+    <3> CASE pc[SenderWriteID] \in {"sender_write_data"} /\ free >= Len(msg)
+        BY DEF SenderInfoAccurate, WriteLimit
+    <3> CASE pc[SenderWriteID] \in {"sender_recheck_len", "sender_check_notify_data",
+                                    "sender_notify_data"}
+        BY DEF SenderInfoAccurate, WriteLimit
+    <3> CASE pc[SenderWriteID] \in {"sender_blocked"} BY DEF I
+    <3> CASE pc[SenderWriteID] \in {"Done"} BY DEF CloseOK
+    <3> QED BY DEF SenderInfoAccurate, WriteLimit
+<1> QED OBVIOUS
+
+(* Sender steps preserve WriteLimit (except for sender_ready, where the application
+   decides to send more data). *)
+THEOREM SenderWritePreservesWriteLimit ==
+  ASSUME I, SenderLive, ReceiverLive, SenderWrite, ~sender_ready
+  PROVE  UNCHANGED WriteLimit
+<1> IntegrityI BY DEF I
+<1> PCOK BY DEF IntegrityI
+<1> TypeOK BY DEF IntegrityI
+<1> CloseOK BY DEF I
+<1> NotifyFlagsCorrect BY DEF I
+<1> TypeOK' BY NextPreservesI, I', IntegrityI' DEF I, IntegrityI, Next
+<1> UNCHANGED << pc[SenderCloseID], pc[ReceiverReadID], pc[ReceiverCloseID] >>
+    BY DEF SenderWrite, sender_ready, sender_write, sender_request_notify,
+              sender_recheck_len, sender_write_data,
+              sender_check_notify_data, sender_notify_data,
+              sender_blocked, sender_check_recv_live, PCOK
+<1>1. CASE sender_ready BY <1>1
+<1>2. CASE \/ sender_write \/ sender_request_notify
+           \/ sender_check_notify_data \/ sender_notify_data
+           \/ sender_blocked \/ sender_check_recv_live
+      <3> USE <1>2 DEF sender_write, sender_request_notify,
+                       sender_check_notify_data, sender_notify_data,
+                       sender_blocked, sender_check_recv_live
+      <3> UNCHANGED << Got, Buffer, msg >> OBVIOUS
+      <3> UNCHANGED SenderInfoAccurate BY DEF SenderInfoAccurate
+      <3> CASE SenderInfoAccurate BY DEF WriteLimit
+      <3> CASE ~SenderInfoAccurate BY DEF WriteLimit, SenderInfoAccurate
+      <3> QED OBVIOUS
+<1>3. CASE sender_recheck_len
+      <3> USE <1>3 DEF sender_recheck_len
+      <3> UNCHANGED << Got, Buffer, msg >> OBVIOUS
+      <3> pc'[SenderWriteID] = "sender_write_data" BY DEF PCOK
+      <3> SenderInfoAccurate BY DEF SenderInfoAccurate
+      <3> SenderInfoAccurate'
+          <4> free' \in Nat BY LengthFacts
+          <4> Len(Buffer) + free' = BufferSize BY LengthFacts
+          <4> QED BY DEF SenderInfoAccurate
+      <3> QED BY DEF WriteLimit
+<1>4. CASE sender_write_data /\ free > 0
+      <2> USE <1>4 DEF sender_write_data
+      <2> pc'[SenderWriteID] = "sender_check_notify_data" BY DEF PCOK
+      <2> DEFINE len == Min(Len(msg), free)
+      <2> free <= BufferSize - Len(Buffer) BY DEF IntegrityI
+      <2> Len(msg) > 0 BY DEF IntegrityI
+      <2> len \in 1..Len(msg) BY len > 0 DEF TypeOK, Min
+      <2> TransferResults(msg, msg', Buffer, Buffer', len)
+          BY TransferFacts, FiniteMessageFacts DEF TypeOK
+      <2> Len(Buffer') = Len(Buffer) + len BY DEF TransferResults
+      <2> UNCHANGED (Len(Buffer) + Len(msg))
+          <3> UNCHANGED Len(Buffer \o msg) BY DEF TransferResults
+          <3> Buffer \in MESSAGE /\ msg \in MESSAGE BY BufferSizeType, FiniteMessageFacts DEF TypeOK
+          <3> Len(Buffer \o msg) = Len(Buffer) + Len(msg) BY ConcatFacts
+          <3> Buffer' \in MESSAGE /\ msg' \in MESSAGE BY DEF TransferResults
+          <3> Len(Buffer' \o msg') = Len(Buffer') + Len(msg') BY ConcatFacts
+          <3> QED OBVIOUS
+      <2> CASE SenderInfoAccurate
+          <3> SUFFICES SenderInfoAccurate' BY DEF WriteLimit
+          <3> \/ SpaceAvailableInt
+              \/ free >= Len(msg)
+              \/ Len(Buffer) + free = BufferSize
+              BY DEF SenderInfoAccurate
+          <3> CASE free >= Len(msg)
+              <4> len = Len(msg) BY DEF Min
+              <4> Len(msg') = 0 BY DEF TransferResults
+              <4> QED BY DEF SenderInfoAccurate
+          <3> CASE Len(Buffer) + free = BufferSize /\ free < Len(msg)
+              <4> len = free BY DEF Min, TypeOK
+              <4> Len(Buffer') = BufferSize OBVIOUS
+              <4> QED BY DEF SenderInfoAccurate
+          <3> CASE SpaceAvailableInt
+              <4> QED BY DEF SenderInfoAccurate
+          <3> QED BY DEF TypeOK
+      <2> CASE ~SenderInfoAccurate
+          <3> free < Len(msg) BY DEF SenderInfoAccurate, TypeOK
+          <3> len = free BY DEF Min, TypeOK
+          <3> ~SenderInfoAccurate' BY DEF SenderInfoAccurate
+          <3> SUFFICES Len(Got) + Len(Buffer) + free = Len(Got') + Len(Buffer') BY DEF WriteLimit
+          <3> SUFFICES Len(Buffer) + free = Len(Buffer') BY LengthFacts DEF TypeOK
+          <3> QED OBVIOUS
+      <2> QED OBVIOUS
+<1>4b. CASE sender_write_data /\ free = 0
+       <2> USE <1>4b DEF sender_write_data
+       <2> pc'[SenderWriteID] = "sender_blocked" BY DEF PCOK
+       <2> UNCHANGED << Got, Buffer, msg >> OBVIOUS
+       <2> CASE SenderInfoAccurate
+            <3> \/ SpaceAvailableInt
+                \/ free >= Len(msg)
+                \/ Len(Buffer) + free = BufferSize
+                BY DEF SenderInfoAccurate
+            <3> SUFFICES SenderInfoAccurate' BY DEF WriteLimit
+            <3> CASE free >= Len(msg) BY Len(msg) > 0 DEF IntegrityI
+            <3> QED BY DEF SenderInfoAccurate
+       <2> CASE ~SenderInfoAccurate
+           <3> ~SenderInfoAccurate' BY DEF SenderInfoAccurate, TypeOK
+           <3> QED BY DEF WriteLimit
+       <2> QED OBVIOUS
+<1> QED BY <1>1, <1>2, <1>3, <1>4, <1>4b DEF SenderWrite, TypeOK
+
+(* When in the ready or blocked states, WriteLimit predicts that we will write exactly
+   what we have already written, which is obviously the correct answer.
+   In other states, and if no other process runs, we must eventually reach one of these
+   known-correct states without performing a sender_ready step. Therefore, WriteLimit will
+   not have changed (due to SenderWritePreservesWriteLimit) and it must have been correct.
+   For example, if we are at sender_write and WriteLimit says we will write 6 bytes, and
+   we only take SenderWrite steps, then we will end up in a state where:
+   WriteLimit = 6 = Len(Got) + Len(Buffer)
+   And therefore we have indeed written 6 bytes. *)
+THEOREM WriteLimitCorrectWhenBlocked ==
+  ASSUME I, SenderLive,
+         \/ pc[SenderWriteID] = "sender_ready"
+         \/ pc[SenderWriteID] = "sender_blocked" /\ ~SpaceAvailableInt
+  PROVE WriteLimit = Len(Got) + Len(Buffer)
+<1> TypeOK /\ PCOK /\ IntegrityI BY DEF I, IntegrityI
+<1> CASE pc[SenderWriteID] = "sender_ready"
+    <2> Len(msg) = 0 BY DEF IntegrityI
+    <2> SenderInfoAccurate BY DEF SenderInfoAccurate
+    <2> Min(BufferSize, Len(Buffer) + Len(msg)) = Len(Buffer)
+        BY LengthFacts DEF Min
+    <2> QED BY DEF WriteLimit
+<1> CASE pc[SenderWriteID] = "sender_blocked" /\ ~SpaceAvailableInt
+    <2> CASE SenderInfoAccurate
+        <3> Len(Buffer) + free = BufferSize BY DEF SenderInfoAccurate
+        <3> free = 0 BY DEF IntegrityI
+        <3> Len(Buffer) = BufferSize OBVIOUS
+        <3> WriteLimit = Len(Got) + Min(BufferSize, BufferSize + Len(msg)) BY DEF WriteLimit
+        <3> QED BY LengthFacts DEF Min
+    <2> CASE ~SenderInfoAccurate BY DEF WriteLimit
+    <2> QED OBVIOUS
+<1> QED BY DEF WriteLimit
+
+(* The obvious fact that if WriteLimit doesn't change then it doesn't decrease. *)
+LEMMA UnchangedWriteLimitGe ==
+  ASSUME I, UNCHANGED WriteLimit
+  PROVE WriteLimit' >= WriteLimit
+<1> TypeOK /\ PCOK BY DEF IntegrityI, I
+<1> pc[SenderWriteID] \in {"sender_ready", "sender_write", "sender_request_notify",
+      "sender_recheck_len", "sender_write_data", "sender_blocked", "sender_check_notify_data",
+      "sender_notify_data", "sender_check_recv_live", "Done"} BY DEF PCOK
+<1> Len(Buffer) + Len(msg) \in Nat BY LengthFacts DEF WriteLimit, TypeOK
+<1> CASE SenderInfoAccurate
+    <2> Min(BufferSize, Len(Buffer) + Len(msg)) \in Nat BY LengthFacts DEF Min
+    <2> Len(Got) \in Nat BY LengthFacts
+    <2> WriteLimit \in Nat BY DEF WriteLimit
+    <2> QED OBVIOUS
+<1> CASE ~SenderInfoAccurate BY DEF WriteLimit, SenderInfoAccurate, TypeOK
+<1> QED OBVIOUS
+
+(* The difficult case for WriteLimitMonotonic is showing that when the receiver
+   moves data from Buffer to Got, WriteLimit doesn't go down: *)
+LEMMA RecvTransferWriteLimit ==
+  ASSUME I, recv_read_data, SenderLive, have > 0
+  PROVE  WriteLimit' >= WriteLimit
+<1> USE DEF recv_read_data
+<1> IntegrityI /\ TypeOK /\ PCOK BY DEF IntegrityI, I
+<1> TypeOK' BY NextPreservesI, I', IntegrityI' DEF Next, ReceiverRead, I, IntegrityI
+<1> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >>
+    BY DEF recv_read_data, PCOK
+<1> DEFINE len == Min(want, have)
+<1> len \in 1..Len(Buffer) BY want >= 1 DEF IntegrityI, TypeOK, Min
+<1> TransferResults(Buffer, Buffer', Got, Got', len)
+    BY TransferFacts, FiniteMessageFacts DEF TypeOK
+<1> UNCHANGED (Len(Got) + Len(Buffer))
+    <2> UNCHANGED (Got \o Buffer) BY DEF TransferResults
+    <2> QED BY ConcatFacts
+<1> pc[SenderWriteID] \in {"sender_ready", "sender_write", "sender_request_notify",
+      "sender_recheck_len", "sender_write_data", "sender_blocked", "sender_check_notify_data",
+      "sender_notify_data", "sender_check_recv_live", "Done"} BY DEF PCOK
+<1> DEFINE lg1 == Len(Got)
+<1> DEFINE lb1 == Len(Buffer)
+<1> DEFINE lg2 == Len(Got')
+<1> DEFINE lb2 == Len(Buffer')
+<1> DEFINE lm  == Len(msg)
+<1> lb2 = lb1 - len BY DEF TransferResults
+<1> lb2 < lb1
+    <2> HIDE DEF len
+    <2> QED BY LengthFacts
+<1> lg1 + lb1 = lg2 + lb2 OBVIOUS
+<1> lg2 > lg1 OBVIOUS
+<1> /\ lg1 \in Nat
+    /\ lg2 \in Nat
+    /\ lb1 \in Nat
+    /\ lb2 \in Nat
+    /\ lm  \in Nat
+    /\ BufferSize \in Nat
+    BY LengthFacts
+<1> CASE SenderInfoAccurate
+    <2> CASE SenderInfoAccurate'
+        <3> SUFFICES lg2 + Min(BufferSize, lb2 + lm)
+                     >= lg1 + Min(BufferSize, lb1 + lm) BY DEF WriteLimit
+        <3> HIDE DEF lg1, lg2, lb1, lb2, lm
+        <3> SUFFICES Min(lg2 + BufferSize, lg2 + lb2 + lm)
+                     >= Min(lg1 + BufferSize, lg1 + lb1 + lm)
+            <4> DEFINE x1 == lb1 + lm
+            <4> DEFINE x2 == lb2 + lm
+            <4> SUFFICES lg2 + Min(BufferSize, x2) >= lg1 + Min(BufferSize, x1) OBVIOUS
+            <4> x1 \in Nat /\ x2 \in Nat OBVIOUS
+            <4> lg2 + (lb2 + lm) = (lg2 + lb2) + lm OBVIOUS
+            <4> lg1 + (lb1 + lm) = (lg1 + lb1) + lm OBVIOUS
+            <4> Min(lg2 + BufferSize, lg2 + (lb2 + lm))
+                     >= Min(lg1 + BufferSize, lg1 + (lb1 + lm)) OBVIOUS
+            <4> Min(lg2 + BufferSize, lg2 + x2) >= Min(lg1 + BufferSize, lg1 + x1) OBVIOUS
+            <4> HIDE DEF x1, x2
+            <4> lg2 + Min(BufferSize, x2) >= lg1 + Min(BufferSize, x1)
+                BY BufferSizeType DEF Min
+            <4> QED OBVIOUS
+        <3> SUFFICES Min(lg2 + BufferSize, (lg2 + lb2) + lm)
+                     >= Min(lg1 + BufferSize, (lg1 + lb1) + lm)
+            OBVIOUS
+        <3> (lg2 + lb2) + lm = (lg1 + lb1) + lm OBVIOUS
+        <3> SUFFICES lg2 + BufferSize >= lg1 + BufferSize BY DEF Min
+        <3> QED OBVIOUS
+    <2> CASE ~SenderInfoAccurate'
+        <3> pc[SenderWriteID] \in {"sender_write_data", "sender_check_notify_data",
+                                   "sender_notify_data", "sender_blocked"}
+            BY DEF SenderInfoAccurate
+        <3> CASE pc[SenderWriteID] \in {"sender_write_data"}
+            <4> free < lm BY DEF SenderInfoAccurate, TypeOK
+            <4> lb1 + free = BufferSize BY DEF SenderInfoAccurate
+            <4> SUFFICES lg2 + lb2 + free >= lg1 + Min(BufferSize, Len(Buffer) + lm)
+                BY DEF WriteLimit
+            <4> SUFFICES lg1 + lb1 + free >= lg1 + Min(BufferSize, Len(Buffer) + lm)
+                OBVIOUS
+            <4> SUFFICES lg1 + BufferSize >= lg1 + Min(BufferSize, Len(Buffer) + lm)
+                BY DEF TypeOK
+            <4> QED BY DEF Min
+        <3> CASE pc[SenderWriteID] \in {"sender_check_notify_data",
+                                        "sender_notify_data", "sender_blocked"}
+            <4> \/ lb1 + free = BufferSize
+                \/ lm = 0 BY DEF SenderInfoAccurate
+            <4> CASE lb1 + free = BufferSize
+                <5> free = 0 BY DEF IntegrityI, TypeOK
+                <5> SUFFICES lg2 + lb2 >= lg1 + Min(BufferSize, BufferSize + lm) BY DEF WriteLimit
+                <5> SUFFICES lg2 + lb2 >= lg1 + BufferSize BY DEF Min
+                <5> SUFFICES lg1 + lb1 >= lg1 + BufferSize OBVIOUS
+                <5> QED OBVIOUS
+            <4> CASE lm = 0
+                <5> SUFFICES lg2 + lb2  >= lg1 + Min(BufferSize, lb1)
+                    BY DEF WriteLimit
+                <5> SUFFICES lg1 + lb1 >= lg1 + Min(BufferSize, lb1)
+                    OBVIOUS
+                <5> QED BY DEF Min
+            <4> QED OBVIOUS
+        <3> QED OBVIOUS
+    <2> QED OBVIOUS
+<1> CASE ~SenderInfoAccurate
+    <2> ~SenderInfoAccurate'
+        <3> CASE lb2 + free = BufferSize
+            <4> CASE free = 0
+                <5> lb2 = BufferSize OBVIOUS
+                <5> Len(Buffer) > BufferSize BY LengthFacts
+                <5> Len(Buffer) <= BufferSize BY LengthFacts
+                <5> Len(Buffer) \in Nat /\ BufferSize \in Nat BY LengthFacts
+                <5> QED OBVIOUS
+            <4> CASE free > 0
+                <5> pc[SenderWriteID] \in {"sender_write", "sender_request_notify",
+                                           "sender_recheck_len", "sender_write_data"}
+                    BY DEF IntegrityI
+                <5> CASE /\ pc[SenderWriteID] \in {"sender_write_data"}
+                         /\ Len(Buffer') + free = BufferSize
+                    <6> HIDE DEF len
+                    <6> Len(Buffer) + free < BufferSize
+                        <7> Len(Buffer) + free /= BufferSize BY LengthFacts DEF TypeOK
+                        <7> free <= BufferSize - Len(Buffer) BY DEF IntegrityI
+                        <7> QED BY LengthFacts, BufferSizeType DEF TypeOK
+                    <6> Len(Buffer') + free < BufferSize BY LengthFacts, BufferSizeType DEF TypeOK
+                    <6> free < Len(msg) BY DEF SenderInfoAccurate, TypeOK
+                    <6> QED BY DEF SenderInfoAccurate, TypeOK
+                <5> QED BY DEF SenderInfoAccurate
+            <4> QED BY DEF TypeOK
+        <3> QED BY DEF SenderInfoAccurate, IntegrityI
+    <2> pc[SenderWriteID] \in {"sender_write_data", "sender_check_notify_data",
+                               "sender_notify_data", "sender_blocked"}
+        BY DEF SenderInfoAccurate
+    <2> CASE pc[SenderWriteID] \in {"sender_write_data"}
+        <3> SUFFICES Len(Got') + Len(Buffer') + free >= Len(Got) + Len(Buffer) + free
+            BY DEF WriteLimit
+        <3> QED BY LengthFacts DEF TypeOK
+    <2> CASE pc[SenderWriteID] \in {"sender_check_notify_data",
+                                    "sender_notify_data", "sender_blocked"}
+        BY LengthFacts DEF WriteLimit, TypeOK
+    <2> QED OBVIOUS
+<1> QED OBVIOUS
+
+(* Signalling the sender cannot lower WriteLimit. *)
+LEMMA NotifySenderWriteLimit ==
+  ASSUME I, SpaceAvailableInt',
+         UNCHANGED pc[SenderWriteID],
+         UNCHANGED << Got, Buffer, msg, free >>
+  PROVE WriteLimit' >= WriteLimit
+<1> IntegrityI /\ TypeOK /\ PCOK BY DEF IntegrityI, I
+<1>1. CASE SpaceAvailableInt
+      <3> USE <1>1
+      <3> UNCHANGED SenderInfoAccurate BY DEF SenderInfoAccurate
+      <3> QED BY UNCHANGED WriteLimit, UnchangedWriteLimitGe DEF WriteLimit
+<1>2. CASE ~SpaceAvailableInt
+      <3> USE <1>2
+      <3> SenderInfoAccurate' BY DEF SenderInfoAccurate
+      <3> CASE SenderInfoAccurate BY UnchangedWriteLimitGe DEF WriteLimit
+      <3> CASE ~SenderInfoAccurate
+          <4> DEFINE m == Min(BufferSize, Len(Buffer) + Len(msg))
+          <4> m \in Nat BY LengthFacts DEF TypeOK, Min
+          <4> WriteLimit' = Len(Got) + m BY DEF WriteLimit
+          <4> CASE pc[SenderWriteID] = "sender_write_data"
+              <5> WriteLimit = Len(Got) + Len(Buffer) + free BY DEF WriteLimit
+              <5> /\ free < Len(msg)
+                  /\ Len(Buffer) + free /= BufferSize
+                  BY DEF SenderInfoAccurate, TypeOK
+              <5> free \in 0..BufferSize BY DEF TypeOK
+              <5> SUFFICES Len(Got) + m >= Len(Got) + Len(Buffer) + free OBVIOUS
+              <5> SUFFICES m >= Len(Buffer) + free OBVIOUS
+              <5> free <= BufferSize - Len(Buffer) BY DEF IntegrityI
+              <5> CASE m = Len(Buffer) + Len(msg)
+                  <6> SUFFICES Len(msg) >= free OBVIOUS
+                  <6> QED BY DEF TypeOK
+              <5> QED BY DEF Min
+          <4> CASE pc[SenderWriteID] \in {"sender_check_notify_data", "sender_notify_data",
+                                          "sender_blocked"}
+              <5> WriteLimit = Len(Got) + Len(Buffer) BY DEF WriteLimit
+              <5> SUFFICES Len(Got) + m >= Len(Got) + Len(Buffer) OBVIOUS
+              <5> SUFFICES m >= Len(Buffer) OBVIOUS
+              <5> QED BY LengthFacts DEF Min
+          <4> QED BY DEF SenderInfoAccurate, PCOK
+      <3> QED OBVIOUS
+<1> QED BY <1>1, <1>2
+
+(* WriteLimit never decreases (unless the sender or receiver decides to close the connection). *)
+THEOREM WriteLimitMonotonic ==
+  ASSUME I, Next, SenderLive, ReceiverLive
+  PROVE  WriteLimit' >= WriteLimit
+<1> IntegrityI BY DEF I
+<1> TypeOK BY DEF IntegrityI
+<1> PCOK BY DEF IntegrityI
+<1> CloseOK BY DEF I
+<1> TypeOK' /\ IntegrityI' BY NextPreservesI, I', IntegrityI' DEF I, IntegrityI
+<1>1. CASE SenderWrite
+      <2> USE <1>1
+      <2> CASE sender_ready
+          <3> USE DEF sender_ready
+          <3> pc'[SenderWriteID] = "sender_write" BY DEF PCOK
+          <3> SenderInfoAccurate BY DEF SenderInfoAccurate
+          <3> SenderInfoAccurate' BY DEF SenderInfoAccurate
+          <3> Len(msg') > Len(msg) BY DEF IntegrityI
+          <3> DEFINE l1 == Len(Buffer) + Len(msg)
+          <3> DEFINE l2 == Len(Buffer) + Len(msg')
+          <3> l2 > l1 OBVIOUS
+          <3> l1 \in Nat /\ l2 \in Nat OBVIOUS
+          <3> SUFFICES Len(Got) + Min(BufferSize, l2)
+                       >= Len(Got) + Min(BufferSize, l1) BY DEF WriteLimit
+          <3> HIDE DEF l1, l2
+          <3> Min(BufferSize, l2) >= Min(BufferSize, l1) BY BufferSizeType DEF Min
+          <3> Len(Got) \in Nat BY LengthFacts DEF TypeOK
+          <3> QED BY BufferSizeType DEF Min
+      <2> QED BY SenderWritePreservesWriteLimit, UnchangedWriteLimitGe DEF SenderWrite
+<1>2. CASE SenderClose
+      <2> USE <1>2
+      <2> SUFFICES UNCHANGED WriteLimit BY UnchangedWriteLimitGe
+      <2> UNCHANGED << pc[SenderWriteID], pc[ReceiverReadID], pc[ReceiverCloseID] >>
+            BY DEF SenderClose, sender_open, sender_notify_closed, PCOK
+      <2> UNCHANGED << Got, Buffer, msg, free, SpaceAvailableInt >>
+          BY DEF SenderClose, sender_open, sender_notify_closed
+      <2> UNCHANGED SenderInfoAccurate BY DEF SenderInfoAccurate
+      <2> QED BY UNCHANGED WriteLimit DEF WriteLimit
+<1>3. CASE ReceiverRead
+      <2> USE <1>3
+      <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >>
+        BY DEF ReceiverRead, recv_init, recv_ready, recv_reading, recv_got_len,
+                  recv_recheck_len, recv_read_data,
+                  recv_check_notify_read, recv_notify_read,
+                  recv_await_data, recv_final_check, PCOK
+      <2>1. CASE \/ recv_init \/ recv_ready \/ recv_reading \/ recv_got_len
+                 \/ recv_recheck_len \/ recv_check_notify_read
+                 \/ recv_await_data \/ recv_final_check
+            <3> USE <2>1
+            <3> UNCHANGED << Got, Buffer, msg, free, SpaceAvailableInt >>
+                BY DEF recv_init, recv_ready, recv_reading, recv_got_len,
+                    recv_recheck_len, recv_check_notify_read,
+                    recv_await_data, recv_final_check
+            <3> UNCHANGED SenderInfoAccurate BY DEF SenderInfoAccurate
+            <3> QED BY UNCHANGED WriteLimit, UnchangedWriteLimitGe DEF WriteLimit
+      <2>2. CASE recv_read_data
+            <3> USE <2>2
+            <3> USE DEF recv_read_data
+            <3>1. CASE have = 0
+                  <4> USE <3>1
+                  <4> UNCHANGED << Got, Buffer, msg >> OBVIOUS
+                  <4> QED BY UNCHANGED WriteLimit, UnchangedWriteLimitGe DEF SenderInfoAccurate, WriteLimit
+            <3>2. CASE have > 0
+                  <4> USE <3>2
+                  <4> QED BY RecvTransferWriteLimit
+          <3> QED BY <3>1, <3>2 DEF TypeOK
+      <2>3. CASE recv_notify_read BY <2>3, NotifySenderWriteLimit DEF recv_notify_read
+      <2> QED BY <2>1, <2>2, <2>3 DEF ReceiverRead
+<1>4. CASE ReceiverClose
+      <2> USE <1>4
+      <2> SUFFICES UNCHANGED WriteLimit BY UnchangedWriteLimitGe
+      <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverReadID] >>
+          BY DEF ReceiverClose, recv_open, recv_notify_closed, PCOK
+      <2> UNCHANGED << Got, Buffer, msg, free, SpaceAvailableInt >>
+          BY DEF ReceiverClose, recv_open, recv_notify_closed, CloseOK
+      <2> UNCHANGED SenderInfoAccurate BY DEF SenderInfoAccurate
+      <2> QED BY UNCHANGED WriteLimit DEF WriteLimit
+<1>5. CASE SpuriousInterrupts
+    <2> USE <1>5 DEF spurious
+    <2> spurious BY DEF SpuriousInterrupts
+    <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverReadID] >> BY DEF PCOK
+    <2> UNCHANGED << Got, Buffer, msg >> OBVIOUS
+    <2>1. CASE ~SpaceAvailableInt'
+          <3> USE <2>1
+          <3> UNCHANGED SpaceAvailableInt OBVIOUS
+          <3> UNCHANGED SenderInfoAccurate BY DEF SenderInfoAccurate
+          <3> UNCHANGED WriteLimit BY DEF WriteLimit
+          <3> QED BY UnchangedWriteLimitGe
+    <2>2. CASE SpaceAvailableInt' BY <2>2, NotifySenderWriteLimit
+    <2> QED BY <2>1, <2>2
+<1>6. CASE UNCHANGED vars
+      <2> USE <1>6 DEF vars
+      <2> UNCHANGED pc[SenderWriteID] BY DEF PCOK
+      <2> QED BY UnchangedWriteLimitGe DEF SenderInfoAccurate, WriteLimit
 <1> QED BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6 DEF Next
 
 =============================================================================
