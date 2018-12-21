@@ -750,7 +750,7 @@ PCOK == pc \in [
 
    Definition Overrides:
      - MSG <- MSG_SEQ
-     - AvailabilityNat <- 0..4
+     - AvailabilityNat <- 0..5
 
    State Constraints:
      - Len(Sent) < 4
@@ -767,6 +767,10 @@ PCOK == pc \in [
 (* Override MSG with this to limit Sent to the form << 1, 2, 3, ... >>.
    This is much faster to check and will still detect any dropped or reordered bytes. *)
 MSG_SEQ == { [ x \in 1..N |-> Len(Sent) + x ] : N \in 1..MaxWriteLen }
+
+\* These are just here because we can't put expressions in TLC config files.
+ZeroToFive == 0..5
+LimitSent == Len(Sent) < 4
 
 -----------------------------------------------------------------------------
 
