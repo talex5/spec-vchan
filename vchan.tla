@@ -855,13 +855,8 @@ NotifyFlagsCorrect ==
         \/ SpaceAvailableInt
         \/ pc[ReceiverReadID] = "recv_notify_read"
 
-(* The main inductive invariant:
-   - Extends IntegrityI.
-   - Some simple facts about shutting down connections.
-   - The notify flags have been set correctly.
-   - If the notify flags are still set, the information is still up-to-date. *)
-I ==
-  /\ IntegrityI
+(* Some obvious facts about shutting down connections. *)
+CloseOK ==
   \* An endpoint is live iff its close thread hasn't done anything:
   /\ pc[SenderCloseID] = "sender_open" <=> SenderLive
   /\ pc[ReceiverCloseID] = "recv_open" <=> ReceiverLive
@@ -872,6 +867,13 @@ I ==
   /\ pc[ReceiverCloseID] = "Done" =>
           \/ SpaceAvailableInt
           \/ pc[SenderWriteID] \in {"sender_check_recv_live", "Done"}
+
+(* The main inductive invariant:
+   - The notify flags must have been set correctly.
+   - If the notify flags are still set, the information is still up-to-date. *)
+I ==
+  /\ IntegrityI
+  /\ CloseOK
   /\ NotifyFlagsCorrect
   \* If NotifyRead is set then:
   /\ NotifyRead =>
@@ -1067,7 +1069,7 @@ LEMMA SenderWritePreservesI ==
       <2> TypeOK' BY FiniteMessageFacts, ConcatFacts, LengthFacts DEF TypeOK, MSG
       <2> IntegrityI' BY DEF TypeOK, PCOK, IntegrityI, MSG
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>2. CASE sender_write
       <2> USE <1>2 DEF sender_write
       <2> UNCHANGED << pc[SenderCloseID], pc[ReceiverReadID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1077,7 +1079,7 @@ LEMMA SenderWritePreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>3. CASE sender_request_notify
       <2> USE <1>3 DEF sender_request_notify
       <2> UNCHANGED << pc[SenderCloseID], pc[ReceiverReadID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1088,11 +1090,11 @@ LEMMA SenderWritePreservesI ==
           <3> pc'[SenderWriteID] = "sender_write_data" BY DEF PCOK
           <3> ~ (free < Len(msg)) BY DEF TypeOK
           <3> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-          <3> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+          <3> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
       <2> CASE free < Len(msg)
           <3> pc'[SenderWriteID] = "sender_recheck_len" BY DEF PCOK, TypeOK
           <3> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-          <3> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+          <3> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
       <2> QED BY DEF TypeOK
 <1>4. CASE sender_recheck_len
       <2> USE <1>4 DEF sender_recheck_len
@@ -1117,7 +1119,7 @@ LEMMA SenderWritePreservesI ==
           <3> QED BY DEF TypeOK
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
       <2> SenderInfoAccurate' BY LengthFacts DEF SenderInfoAccurate
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>5a. CASE sender_write_data /\ free > 0
       <2> USE <1>5a DEF sender_write_data
       <2> UNCHANGED << pc[SenderCloseID], pc[ReceiverReadID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1220,7 +1222,7 @@ LEMMA SenderWritePreservesI ==
               <4> Len(Buffer') = BufferSize OBVIOUS
               <4> QED BY DEF SenderInfoAccurate
           <3> QED BY DEF SenderInfoAccurate, TypeOK
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>5b. CASE sender_write_data /\ free = 0
       <2> USE <1>5b DEF sender_write_data
       <2> UNCHANGED << pc[SenderCloseID], pc[ReceiverReadID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1230,7 +1232,7 @@ LEMMA SenderWritePreservesI ==
       <2> IntegrityI' BY DEF IntegrityI
       <2> free < Len(msg) BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>6. CASE sender_check_notify_data
       <2> USE <1>6 DEF sender_check_notify_data
       <2> UNCHANGED << pc[SenderCloseID], pc[ReceiverReadID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1238,7 +1240,7 @@ LEMMA SenderWritePreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>7. CASE sender_notify_data
       <2> USE <1>7 DEF sender_notify_data
       <2> UNCHANGED << pc[SenderCloseID], pc[ReceiverReadID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1246,7 +1248,7 @@ LEMMA SenderWritePreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>8. CASE sender_blocked
       <2> USE <1>8 DEF sender_blocked
       <2> UNCHANGED << pc[SenderCloseID], pc[ReceiverReadID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1254,7 +1256,7 @@ LEMMA SenderWritePreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>9. CASE sender_check_recv_live
       <2> USE <1>9 DEF sender_check_recv_live
       <2> UNCHANGED << pc[SenderCloseID], pc[ReceiverReadID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1262,7 +1264,7 @@ LEMMA SenderWritePreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1> QED
     BY <1>1, <1>2, <1>3, <1>4, <1>5a, <1>5b, <1>6, <1>7, <1>8, <1>9 DEF SenderWrite, TypeOK
 
@@ -1283,7 +1285,7 @@ LEMMA SenderClosePreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>2. CASE sender_notify_closed
       <2> USE <1>2 DEF sender_notify_closed
       <2> UNCHANGED << pc[SenderWriteID], pc[ReceiverReadID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1292,7 +1294,7 @@ LEMMA SenderClosePreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>3. QED
   BY <1>1, <1>2 DEF SenderClose
 
@@ -1311,7 +1313,7 @@ LEMMA ReceiverReadPreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>1. CASE recv_ready
       <2> USE <1>1 DEF recv_ready
       <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1319,7 +1321,7 @@ LEMMA ReceiverReadPreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>2. CASE recv_reading
       <2> USE <1>2 DEF recv_reading
       <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1330,7 +1332,7 @@ LEMMA ReceiverReadPreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>3. CASE recv_got_len
       <2> USE <1>3 DEF recv_got_len
       <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1341,17 +1343,17 @@ LEMMA ReceiverReadPreservesI ==
           <3> CASE have < want
               \* We just set the flag, so it must be OK.
               <4> pc'[ReceiverReadID] = "recv_recheck_len" BY DEF PCOK, TypeOK
-              <4> QED BY DEF NotifyFlagsCorrect, I
+              <4> QED BY DEF NotifyFlagsCorrect, I, CloseOK
           <3> CASE have >= want
               \* We're not going to block, so no need to set the flag.
               <4> want /= 0 BY DEF IntegrityI
-              <4> QED BY DEF I, NotifyFlagsCorrect, TypeOK
+              <4> QED BY DEF I, NotifyFlagsCorrect, TypeOK, CloseOK
           <3> QED BY DEF TypeOK
       <2> ASSUME NotifyWrite'
           PROVE  \/ ReaderInfoAccurate'
                  \/ pc[SenderWriteID] \in {"sender_check_notify_data"}
           BY DEF I, ReaderInfoAccurate, TypeOK
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>4. CASE recv_recheck_len
       <2> USE <1>4 DEF recv_recheck_len
       <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1363,7 +1365,7 @@ LEMMA ReceiverReadPreservesI ==
       <2> have' = 0 => have = 0 BY DEF IntegrityI, TypeOK
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
       <2> IntegrityI' BY LengthFacts DEF IntegrityI, Min
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>5a. CASE recv_read_data /\ have > 0
       <2> USE <1>5a DEF recv_read_data
       <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1393,7 +1395,7 @@ LEMMA ReceiverReadPreservesI ==
         <3> QED BY DEF IntegrityI
       <2> want /= 0 BY DEF IntegrityI, TypeOK
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>5b. CASE recv_read_data /\ have = 0
       <2> USE <1>5b DEF recv_read_data
       <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1401,7 +1403,7 @@ LEMMA ReceiverReadPreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>6. CASE recv_check_notify_read
       <2> USE <1>6 DEF recv_check_notify_read
       <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1409,7 +1411,7 @@ LEMMA ReceiverReadPreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>7. CASE recv_notify_read
       <2> USE <1>7 DEF recv_notify_read
       <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1418,7 +1420,7 @@ LEMMA ReceiverReadPreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>8. CASE recv_await_data
       <2> USE <1>8 DEF recv_await_data
       <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1426,7 +1428,7 @@ LEMMA ReceiverReadPreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>9. CASE recv_final_check
       <2> USE <1>9 DEF recv_final_check
       <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >> BY DEF PCOK
@@ -1434,7 +1436,7 @@ LEMMA ReceiverReadPreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1> QED BY <1>0, <1>1, <1>2, <1>3, <1>4, <1>5a, <1>5b, <1>6, <1>7, <1>8, <1>9 DEF ReceiverRead, TypeOK
 
 LEMMA ReceiverClosePreservesI ==
@@ -1454,7 +1456,7 @@ LEMMA ReceiverClosePreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>2. CASE recv_notify_closed
       <2> USE <1>2 DEF recv_notify_closed
       <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverReadID] >> BY DEF PCOK
@@ -1463,7 +1465,7 @@ LEMMA ReceiverClosePreservesI ==
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>3. QED
   BY <1>1, <1>2 DEF ReceiverClose
 
@@ -1481,7 +1483,7 @@ LEMMA SpuriousPreservesI ==
 <1> PCOK' BY DEF PCOK
 <1> IntegrityI' BY DEF IntegrityI
 <1> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
-<1> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+<1> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 
 LEMMA NextPreservesI ==
   I /\ [Next]_vars => I'
@@ -1489,7 +1491,7 @@ LEMMA NextPreservesI ==
       <2> USE <1>1 DEF vars
       <2> UNCHANGED IntegrityI BY DEF IntegrityI, PCOK, TypeOK
       <2> UNCHANGED NotifyFlagsCorrect BY DEF NotifyFlagsCorrect
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>2. CASE Next
       <2>1. CASE SenderWrite BY <2>1, SenderWritePreservesI
       <2>2. CASE SenderClose BY <2>2, SenderClosePreservesI
@@ -1514,7 +1516,7 @@ THEOREM AlwaysI ==
       <2> PCOK BY DEF PCOK
       <2> IntegrityI BY LengthFacts DEF IntegrityI, TypeOK
       <2> NotifyFlagsCorrect BY DEF NotifyFlagsCorrect
-      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate
+      <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>2. I /\ [][Next]_vars => []I
       BY NextPreservesI, PTL
 <1>3. QED
