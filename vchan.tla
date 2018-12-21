@@ -86,6 +86,12 @@ ASSUME MaxWriteLenType == MaxWriteLen \in Nat
 CONSTANT MaxReadLen
 ASSUME MaxReadLenType == MaxReadLen \in Nat
 
+(* Normally a receiving application will start by performing a read call, and blocking
+   only if the buffer is empty. However, some applications (e.g. QubesDB) block first
+   without checking the buffer. *)
+CONSTANT ReceiverBlocksFirst
+ASSUME ReceiverBlocksFirst \in BOOLEAN
+
 Min(x, y) == IF x < y THEN x ELSE y
 
 (* The type of the entire message the client application sends. *)
@@ -269,8 +275,8 @@ sender_check_recv_live:   if (~ReceiverLive) goto Done;
             want = 0,     \* The amount of data the user wants us to read.
             Got = << >>;  \* Pseudo-variable recording all data ever received by receiver.
   {
-recv_init:          either goto recv_ready        \* (recommended)
-                    or {    \* (QubesDB does this)
+recv_init:          if (ReceiverBlocksFirst) {
+                      \* (QubesDB does this)
                       with (n \in 1..MaxReadLen) want := n;
                       goto recv_await_data;
                     };
@@ -494,11 +500,12 @@ sender_notify_closed == /\ pc[SenderCloseID] = "sender_notify_closed"
 SenderClose == sender_open \/ sender_notify_closed
 
 recv_init == /\ pc[ReceiverReadID] = "recv_init"
-             /\ \/ /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_ready"]
-                   /\ want' = want
-                \/ /\ \E n \in 1..MaxReadLen:
-                        want' = n
-                   /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_await_data"]
+             /\ IF ReceiverBlocksFirst
+                   THEN /\ \E n \in 1..MaxReadLen:
+                             want' = n
+                        /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_await_data"]
+                   ELSE /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_ready"]
+                        /\ want' = want
              /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, NotifyWrite, 
                              DataReadyInt, NotifyRead, SpaceAvailableInt, free, 
                              msg, Sent, have, Got >>
@@ -762,6 +769,7 @@ PCOK == pc \in [
 
    Properties:
      - Availability
+     - ReadLimitCorrect
  *)
 
 (* Override MSG with this to limit Sent to the form << 1, 2, 3, ... >>.
@@ -1533,7 +1541,7 @@ BY AlwaysI DEF Spec
 
 -----------------------------------------------------------------------------
 
-\* Deadlock and liveness
+\* Deadlock
 
 (* We can't get into a state where the sender and receiver are both blocked
    and there is no wakeup pending: *)
@@ -1582,5 +1590,226 @@ THEOREM DeadlockFree2 ==
    However, if we don't end up forever in a behaviour with both processes blocked,
    then some process must keep getting signalled. We only send signals after making
    progress, so lack of deadlock implies progress. *)
+
+-----------------------------------------------------------------------------
+
+\* ReadLimit
+
+(* The number of bytes that the receiver will eventually get without further action
+   from the sender (assuming the receiver doesn't decide to close the connection). *)
+ReadLimit ==
+  LET PC == pc[ReceiverReadID] IN
+  CASE PC \in {"recv_ready", "recv_reading", "recv_got_len", "recv_recheck_len",
+               "recv_check_notify_read", "recv_notify_read", "recv_final_check"} ->
+              Len(Got) + Len(Buffer)       \* Will check again
+              \* (for recv_final_check we might also exit if Len(Buffer) = 0,
+              \* but then this is equal to Len(Got), so still correct)
+    [] PC \in {"recv_read_data"} ->
+              IF have > 0 \/ DataReadyInt \/ ~SenderLive
+              THEN Len(Got) + Len(Buffer)  \* Will read and check again
+              ELSE Len(Got)                \* Will read nothing and block
+    [] PC \in {"recv_await_data"} ->
+              IF DataReadyInt
+              THEN Len(Got) + Len(Buffer)  \* Will check again
+              ELSE Len(Got)                \* Will continue blocking
+    [] PC \in {"recv_init"} ->
+              IF DataReadyInt \/ ~ReceiverBlocksFirst
+              THEN Len(Got) + Len(Buffer)  \* Will check again
+              ELSE Len(Got)                \* Will block
+    [] PC \in {"Done"} ->
+              Len(Got)
+
+(* If ReadLimit says we will read some amount of data, then we will (unless
+   we decide to close the connection).
+   This should be checked without weak fairness (so just Init /\ [][Next]_vars). *)
+ReadLimitCorrect ==
+  /\ WF_vars(ReceiverRead) =>
+      \A i \in AvailabilityNat :
+        ReadLimit = i ~> Len(Got) >= i \/ ~ReceiverLive
+  \* ReadLimit can only decrease if we decide to shut down:
+  /\ [][ReadLimit' >= ReadLimit \/ ~ReceiverLive]_vars
+  \* ReceiverRead steps don't change the read limit:
+  /\ [][ReceiverRead => UNCHANGED ReadLimit \/ ~ReceiverLive]_vars
+
+(* Whenever the sender is blocked or idle, the receiver can read everything in
+   the buffer without further action from any other process. *)
+THEOREM ReadAllIfSenderBlocked ==
+  ASSUME I, SenderLive, ReceiverLive, ~SpaceAvailableInt,
+         pc[SenderWriteID] \in {"sender_ready", "sender_blocked"}
+  PROVE  ReadLimit = Len(Got) + Len(Buffer)
+<1> IntegrityI BY DEF I
+<1> PCOK BY DEF IntegrityI
+<1> TypeOK BY DEF IntegrityI
+<1> CloseOK BY DEF I
+<1> NotifyFlagsCorrect BY DEF I
+<1> CASE pc[ReceiverReadID] \in  {"recv_ready", "recv_reading", "recv_got_len",
+            "recv_recheck_len", "recv_check_notify_read",
+            "recv_notify_read", "recv_final_check"} BY DEF ReadLimit
+<1> CASE pc[ReceiverReadID] \in {"recv_read_data"}
+    <3> CASE have > 0 \/ DataReadyInt \/ ~SenderLive BY DEF ReadLimit
+    <3> CASE have = 0 /\ ~DataReadyInt /\ SenderLive
+        <4> ReadLimit = Len(Got) BY DEF ReadLimit
+        <4> SUFFICES Len(Buffer) = 0 OBVIOUS
+        <4> \/ NotifyWrite
+            \/ DataReadyInt
+            \/ pc[SenderWriteID] = "sender_notify_data"
+            BY DEF NotifyFlagsCorrect
+        <4> CASE NotifyWrite /\ Len(Buffer) > 0
+            BY have > 0 DEF ReaderInfoAccurate, I
+        <4> QED OBVIOUS
+    <3> QED BY DEF TypeOK
+<1> CASE pc[ReceiverReadID] \in {"recv_init", "recv_await_data"}
+    <2> CASE DataReadyInt BY DEF ReadLimit
+    <2> CASE ~DataReadyInt
+        <3> have = 0 BY DEF IntegrityI
+        <3> NotifyWrite BY DEF NotifyFlagsCorrect
+        <3> ReaderInfoAccurate BY DEF I
+        <3> Len(Buffer) = 0 BY DEF ReaderInfoAccurate
+        <3> QED BY DEF ReadLimit
+    <2> QED OBVIOUS
+<1> CASE pc[ReceiverReadID] \in {"Done"} BY DEF CloseOK
+<1> QED BY DEF PCOK
+
+(* ReceiverRead steps don't change ReadLimit, as long as the receiver hasn't closed
+   the connection. Therefore ReadLimit is correct:
+   - When the receiver is blocked it cannot read any more than it has without help.
+   - ReadLimit is Len(Got) then, so ReadLimit is obviously correct in this case.
+   - Since read steps preserve ReadLimit, this shows that ReadLimit is correct
+     in all cases.
+   e.g. if ReadLimit = 5 and no other processes do anything, then we will end
+   up in a state with the receiver blocked, and ReadLimit = Len(Got) = 5 and so
+   we really did read a total of 5 bytes. *)
+THEOREM ReceiverReadPreservesReadLimit ==
+  ASSUME I, ReceiverLive, ReceiverRead
+  PROVE  UNCHANGED ReadLimit
+<1> IntegrityI BY DEF I
+<1> PCOK BY DEF IntegrityI
+<1> TypeOK BY DEF IntegrityI
+<1> CloseOK BY DEF I
+<1> NotifyFlagsCorrect BY DEF I
+<1> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >>
+    BY DEF ReceiverRead, recv_init, recv_ready, recv_reading, recv_got_len,
+            recv_recheck_len, recv_read_data,
+            recv_check_notify_read, recv_notify_read,
+            recv_await_data, recv_final_check, PCOK
+<1>1. CASE recv_read_data
+      <2> USE <1>1
+      <2> USE DEF recv_read_data
+      <2> CASE have > 0
+          <3> Min(want, have) \in 1..Len(Buffer) BY DEF TypeOK, IntegrityI, Min
+          <3> Buffer \in MESSAGE BY FiniteMessageFacts DEF TypeOK
+          <3> Take(Buffer, Min(want, have)) \o Drop(Buffer, Min(want, have)) = Buffer
+              BY TakeDropFacts
+          <3> UNCHANGED (Got \o Buffer) BY DEF TypeOK
+          <3> QED BY DEF ReadLimit
+      <2> CASE have = 0 BY DEF recv_read_data, TypeOK, ReadLimit
+      <2> QED BY DEF TypeOK
+<1>2. CASE ~recv_read_data
+    <2> USE <1>2
+    <2> UNCHANGED << Got, Buffer >>
+        BY DEF ReceiverRead, recv_init, recv_ready, recv_reading, recv_got_len,
+            recv_recheck_len, recv_read_data,
+            recv_check_notify_read, recv_notify_read,
+            recv_await_data, recv_final_check
+    <2>1. CASE recv_final_check BY <2>1 DEF recv_final_check, TypeOK, ReadLimit 
+    <2>2. CASE recv_reading \/ recv_check_notify_read \/ recv_notify_read
+          <4> USE <2>2
+          <4> USE DEF ReadLimit, recv_ready, recv_reading,
+                  recv_recheck_len, recv_read_data,
+                  recv_check_notify_read, recv_notify_read,
+                  recv_await_data, recv_final_check
+          <4> pc'[ReceiverReadID] \in {"recv_ready", "recv_reading", "recv_got_len",
+                     "recv_recheck_len", "recv_check_notify_read",
+                     "recv_await_data", "recv_notify_read", "recv_final_check"} BY DEF PCOK
+          <4> QED BY DEF ReadLimit
+    <2>3. CASE recv_await_data
+          BY <2>3 DEF recv_await_data, ReadLimit
+    <2>4. CASE recv_ready BY <2>4 DEF recv_ready, ReadLimit
+    <2>5. CASE recv_recheck_len
+          <4> USE <2>5 DEF recv_recheck_len
+          <4> ReadLimit = Len(Got) + Len(Buffer) BY DEF ReadLimit
+          <4> pc'[ReceiverReadID] = "recv_read_data" BY DEF PCOK
+          <4> CASE have' > 0 \/ DataReadyInt
+                <5> ReadLimit' = Len(Got) + Len(Buffer) BY DEF ReadLimit
+                <5> QED OBVIOUS
+          <4> CASE have' = 0 /\ ~DataReadyInt
+                <5> ReadLimit' = Len(Got) BY DEF ReadLimit
+                <5> want /= 0 BY DEF IntegrityI
+                <5> Len(Buffer) = 0 BY LengthFacts DEF Min
+                <5> QED OBVIOUS
+          <4> QED BY have' >= 0 DEF TypeOK
+    <2>6. CASE recv_got_len
+          <3> USE <2>6 DEF recv_got_len
+          <3> ReadLimit = Len(Got) + Len(Buffer) BY DEF ReadLimit
+          <3> CASE have >= want
+              <4> want > 0 BY DEF IntegrityI, TypeOK
+              <4> have > 0 BY DEF TypeOK
+              <4> pc'[ReceiverReadID] = "recv_read_data" BY DEF PCOK
+              <4> QED BY DEF ReadLimit
+          <3> CASE have < want
+              <4> pc'[ReceiverReadID] = "recv_recheck_len" BY DEF PCOK, TypeOK
+              <4> QED BY DEF ReadLimit
+          <3> QED BY have' >= 0 DEF TypeOK
+    <2>7. CASE recv_init BY <2>7 DEF recv_init, ReadLimit, PCOK
+    <2> QED BY <2>1, <2>2, <2>3, <2>4, <2>5, <2>6, <2>7 DEF ReceiverRead
+<1> QED BY <1>1, <1>2 DEF SenderWrite
+
+(* ReadLimit never decreases (unless the receiver decides to close the connection). *)
+THEOREM ReadLimitMonotonic ==
+  ASSUME I, Next, ReceiverLive
+  PROVE  ReadLimit' >= ReadLimit
+<1> IntegrityI BY DEF I
+<1> TypeOK BY DEF IntegrityI
+<1> PCOK BY DEF IntegrityI
+<1> TypeOK' BY NextPreservesI, I', IntegrityI' DEF I, IntegrityI
+<1> SUFFICES ReadLimit' >= ReadLimit \/ UNCHANGED ReadLimit
+    BY DEF ReadLimit, TypeOK
+<1>1. CASE SenderWrite
+      <2> USE <1>1
+      <2> UNCHANGED << pc[SenderCloseID], pc[ReceiverReadID], pc[ReceiverCloseID] >>
+          BY DEF SenderWrite, sender_ready, sender_write, sender_request_notify,
+                    sender_recheck_len, sender_write_data,
+                    sender_check_notify_data, sender_notify_data,
+                    sender_blocked, sender_check_recv_live, PCOK
+      <2> CASE sender_write_data BY DEF sender_write_data, TypeOK, ReadLimit
+      <2> CASE ~sender_write_data
+            <3> UNCHANGED << Got, Buffer >>
+                BY DEF SenderWrite, sender_ready, sender_write,
+                        sender_request_notify, sender_recheck_len,
+                        sender_check_notify_data, sender_notify_data,
+                        sender_blocked, sender_check_recv_live
+            <3> QED BY DEF ReadLimit
+      <2> QED BY DEF SenderWrite
+<1>2. CASE SenderClose
+      <2> USE <1>2
+      <2> UNCHANGED << pc[SenderWriteID], pc[ReceiverReadID], pc[ReceiverCloseID] >>
+            BY DEF SenderClose, sender_open, sender_notify_closed, PCOK
+      <2> UNCHANGED << Got, Buffer >>
+          BY DEF SenderClose, sender_open, sender_notify_closed
+      <2> QED BY UNCHANGED ReadLimit DEF ReadLimit
+<1>3. CASE ReceiverRead BY <1>3, ReceiverReadPreservesReadLimit
+<1>4. CASE ReceiverClose
+    <2> USE <1>4
+    <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverReadID] >>
+        BY DEF ReceiverClose, recv_open, recv_notify_closed, PCOK
+    <2> UNCHANGED << Got, Buffer >>
+        BY DEF ReceiverClose, recv_open, recv_notify_closed, PCOK
+    <2> QED BY UNCHANGED ReadLimit DEF ReadLimit
+<1>5. CASE SpuriousInterrupts 
+    <2> USE <1>5 DEF spurious
+    <2> spurious BY DEF SpuriousInterrupts
+    <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverReadID] >> BY DEF PCOK
+    <2> UNCHANGED << Got, Buffer >> OBVIOUS
+    <2> CASE DataReadyInt' = FALSE BY UNCHANGED ReadLimit DEF ReadLimit
+    <2> CASE DataReadyInt' = TRUE
+        <3> CASE pc[ReceiverReadID] \in {"recv_init", "recv_ready", "recv_reading", "recv_got_len",
+                  "recv_recheck_len", "recv_read_data", "recv_final_check",
+                  "recv_await_data", "recv_check_notify_read",
+                  "recv_notify_read", "Done"}
+            BY LengthFacts DEF ReadLimit, PCOK, TypeOK
+        <3> QED BY DEF PCOK
+    <2> QED OBVIOUS
+<1>6. CASE UNCHANGED vars BY <1>6 DEF ReadLimit, vars
+<1> QED BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6 DEF Next
 
 =============================================================================

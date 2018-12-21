@@ -9,6 +9,7 @@ all: check pdfs tlaps
 # Run the TLC model checker
 check:
 	${TLA} tlc -workers ${WORKERS} vchan.tla -config models/SpecOK.cfg
+	${TLA} tlc -workers ${WORKERS} vchan.tla -config models/QubesDB.cfg
 
 # Run the TLAPS proof checker
 tlaps:
