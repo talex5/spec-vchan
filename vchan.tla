@@ -730,6 +730,13 @@ Availability ==
       ~> \/ Len(Got) >= x
          \/ ~ReceiverLive
 
+(* If either side closes the connection, both end up in their Done state
+   (or sender_ready, which is also outside the library). *)
+ShutdownOK ==
+  ~SenderLive \/ ~ReceiverLive
+  ~> <>[] /\ pc[SenderWriteID] \in {"sender_ready", "Done"}
+          /\ pc[ReceiverReadID] = "Done"
+
 (* All the possible states of the program counter. *)
 PCOK == pc \in [
     SW: {"sender_ready", "sender_write", "sender_request_notify", "sender_recheck_len",
