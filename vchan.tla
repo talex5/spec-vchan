@@ -146,13 +146,13 @@ SpuriousID       == "SP"   \* Spurious interrupts from the other direction
 
    On the receiving side:
 
-   1. The receiving application asks us to read up to some amount data.
+   1. The receiving application asks us to read some data.
    2. We check the amount of data available in the buffer.
-   3. If there isn't enough, we set NotifyWrite so the sender will notify us when there is.
+   3. If there isn't any, we set NotifyWrite so the sender will notify us when there is.
       We also check the space again after this, in case it changed while setting the flag.
-   4. If there is any data, we read up to the amount requested.
+   4. If there is some data, we read some or all of it.
       If the NotifyRead flag is set, we clear it and notify the receiver of the new space.
-      We return success to the application (even if we didn't get as much as requested).
+      We return the data read to the application.
    5. Otherwise, we check whether the sender has closed the connection.
       If it has, we check the buffer again in case data was added after we checked.
       If the buffer is still empty, we abort.
@@ -273,25 +273,27 @@ sender_check_recv_live:   if (~ReceiverLive) goto Done;
      get read. *)
   fair process (ReceiverRead = ReceiverReadID)
   variables have = 0,     \* The amount of data we think the buffer contains.
-            want = 0,     \* The amount of data the user wants us to read.
             Got = << >>;  \* Pseudo-variable recording all data ever received by receiver.
   {
 recv_init:          if (ReceiverBlocksFirst) {
                       \* (QubesDB does this)
-                      with (n \in 1..MaxReadLen) want := n;
                       goto recv_await_data;
                     };
 recv_ready:         while (ReceiverLive) {
-                      with (n \in 1..MaxReadLen) want := n;
 recv_reading:         while (TRUE) {
                         have := Len(Buffer);
-recv_got_len:           if (have >= want) goto recv_read_data \* (see note 1)
-                        else NotifyWrite := TRUE;
+recv_got_len:           either {
+                          if (have > 0) goto recv_read_data
+                          else NotifyWrite := TRUE;
+                        } or { \* (see note 1)
+                          NotifyWrite := TRUE;
+                        };
 recv_recheck_len:       have := Len(Buffer);
 recv_read_data:         if (have > 0) {
-                          Got := Got \o Take(Buffer, Min(want, have));
-                          Buffer := Drop(Buffer, Min(want, have));
-                          want := 0;
+                          with (len \in 1..have) {
+                            Got := Got \o Take(Buffer, len);
+                            Buffer := Drop(Buffer, len);
+                          };
                           have := 0;
 recv_check_notify_read:   if (NotifyRead) {
                             NotifyRead := FALSE;      \* (atomic test-and-clear)
@@ -300,11 +302,11 @@ recv_notify_read:           SpaceAvailableInt := TRUE;
                           } else goto recv_ready;     \* Return success
                         } else if (~SenderLive \/ ~ReceiverLive) {
                           \* (see note 2)
-recv_final_check:         if (Len(Buffer) = 0) { want := 0; goto Done }
+recv_final_check:         if (Len(Buffer) = 0) goto Done;
                           else goto recv_reading;
                         };
 recv_await_data:        await DataReadyInt \/ ~ReceiverLive;
-                        if (~ReceiverLive) { want := 0; goto Done }
+                        if (~ReceiverLive) goto Done;
                         else DataReadyInt := FALSE;
                       }
                     }
@@ -334,17 +336,26 @@ recv_await_data:        await DataReadyInt \/ ~ReceiverLive;
 (* Notes on the algorithm:
 
    Note 1:
+   
    The C receiver code sets NotifyWrite whenever there isn't enough data to fill the
    buffer provided by the application completely. Typically, however, an application
    will just give us a buffer big enough for the largest possible message and be happy
    with whatever actual message we return. Therefore, it would probably be better to
    set the flag here only if there is no data at all.
 
+   The first branch of the `either' represents the recommended algorithm. 
+   The `or' branch allows an implementation to set the NotifyWrite flag in other cases too.
+   This covers the behaviour of the C implementation when there is data in Buffer
+   but not as much as requested, as well as the behaviour of QubesDB (which always
+   sets the flag however much data there is).
+
    Note 2:
+   
    The C code doesn't do the recv_final_check check, but that presumably means that it
    might not read all of the client's data.
 
    Note on formatting:
+   
    TLA's PDF rendering gets the indentation wrong if you put a semicolon after a closing brace,
    but the PlusCal-to-TLA translator requires it.
 *)
@@ -355,11 +366,10 @@ recv_await_data:        await DataReadyInt \/ ~ReceiverLive;
 
 \* BEGIN TRANSLATION
 VARIABLES SenderLive, ReceiverLive, Buffer, NotifyWrite, DataReadyInt, 
-          NotifyRead, SpaceAvailableInt, pc, free, msg, Sent, have, want, Got
+          NotifyRead, SpaceAvailableInt, pc, free, msg, Sent, have, Got
 
 vars == << SenderLive, ReceiverLive, Buffer, NotifyWrite, DataReadyInt, 
-           NotifyRead, SpaceAvailableInt, pc, free, msg, Sent, have, want, 
-           Got >>
+           NotifyRead, SpaceAvailableInt, pc, free, msg, Sent, have, Got >>
 
 ProcSet == {SenderWriteID} \cup {SenderCloseID} \cup {ReceiverReadID} \cup {ReceiverCloseID} \cup {SpuriousID}
 
@@ -377,7 +387,6 @@ Init == (* Global variables *)
         /\ Sent = << >>
         (* Process ReceiverRead *)
         /\ have = 0
-        /\ want = 0
         /\ Got = << >>
         /\ pc = [self \in ProcSet |-> CASE self = SenderWriteID -> "sender_ready"
                                         [] self = SenderCloseID -> "sender_open"
@@ -395,14 +404,14 @@ sender_ready == /\ pc[SenderWriteID] = "sender_ready"
                            /\ pc' = [pc EXCEPT ![SenderWriteID] = "sender_write"]
                 /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, NotifyWrite, 
                                 DataReadyInt, NotifyRead, SpaceAvailableInt, 
-                                free, have, want, Got >>
+                                free, have, Got >>
 
 sender_write == /\ pc[SenderWriteID] = "sender_write"
                 /\ free' = BufferSize - Len(Buffer)
                 /\ pc' = [pc EXCEPT ![SenderWriteID] = "sender_request_notify"]
                 /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, NotifyWrite, 
                                 DataReadyInt, NotifyRead, SpaceAvailableInt, 
-                                msg, Sent, have, want, Got >>
+                                msg, Sent, have, Got >>
 
 sender_request_notify == /\ pc[SenderWriteID] = "sender_request_notify"
                          /\ IF free >= Len(msg)
@@ -413,15 +422,14 @@ sender_request_notify == /\ pc[SenderWriteID] = "sender_request_notify"
                          /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, 
                                          NotifyWrite, DataReadyInt, 
                                          SpaceAvailableInt, free, msg, Sent, 
-                                         have, want, Got >>
+                                         have, Got >>
 
 sender_recheck_len == /\ pc[SenderWriteID] = "sender_recheck_len"
                       /\ free' = BufferSize - Len(Buffer)
                       /\ pc' = [pc EXCEPT ![SenderWriteID] = "sender_write_data"]
                       /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, 
                                       NotifyWrite, DataReadyInt, NotifyRead, 
-                                      SpaceAvailableInt, msg, Sent, have, want, 
-                                      Got >>
+                                      SpaceAvailableInt, msg, Sent, have, Got >>
 
 sender_write_data == /\ pc[SenderWriteID] = "sender_write_data"
                      /\ IF free > 0
@@ -433,7 +441,7 @@ sender_write_data == /\ pc[SenderWriteID] = "sender_write_data"
                                 /\ UNCHANGED << Buffer, free, msg >>
                      /\ UNCHANGED << SenderLive, ReceiverLive, NotifyWrite, 
                                      DataReadyInt, NotifyRead, 
-                                     SpaceAvailableInt, Sent, have, want, Got >>
+                                     SpaceAvailableInt, Sent, have, Got >>
 
 sender_check_notify_data == /\ pc[SenderWriteID] = "sender_check_notify_data"
                             /\ IF NotifyWrite
@@ -446,7 +454,7 @@ sender_check_notify_data == /\ pc[SenderWriteID] = "sender_check_notify_data"
                             /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, 
                                             DataReadyInt, NotifyRead, 
                                             SpaceAvailableInt, free, msg, Sent, 
-                                            have, want, Got >>
+                                            have, Got >>
 
 sender_notify_data == /\ pc[SenderWriteID] = "sender_notify_data"
                       /\ DataReadyInt' = TRUE
@@ -456,7 +464,7 @@ sender_notify_data == /\ pc[SenderWriteID] = "sender_notify_data"
                       /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, 
                                       NotifyWrite, NotifyRead, 
                                       SpaceAvailableInt, free, msg, Sent, have, 
-                                      want, Got >>
+                                      Got >>
 
 sender_blocked == /\ pc[SenderWriteID] = "sender_blocked"
                   /\ SpaceAvailableInt \/ ~SenderLive
@@ -467,7 +475,7 @@ sender_blocked == /\ pc[SenderWriteID] = "sender_blocked"
                              /\ pc' = [pc EXCEPT ![SenderWriteID] = "sender_check_recv_live"]
                   /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, 
                                   NotifyWrite, DataReadyInt, NotifyRead, free, 
-                                  msg, Sent, have, want, Got >>
+                                  msg, Sent, have, Got >>
 
 sender_check_recv_live == /\ pc[SenderWriteID] = "sender_check_recv_live"
                           /\ IF ~ReceiverLive
@@ -476,7 +484,7 @@ sender_check_recv_live == /\ pc[SenderWriteID] = "sender_check_recv_live"
                           /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, 
                                           NotifyWrite, DataReadyInt, 
                                           NotifyRead, SpaceAvailableInt, free, 
-                                          msg, Sent, have, want, Got >>
+                                          msg, Sent, have, Got >>
 
 SenderWrite == sender_ready \/ sender_write \/ sender_request_notify
                   \/ sender_recheck_len \/ sender_write_data
@@ -488,7 +496,7 @@ sender_open == /\ pc[SenderCloseID] = "sender_open"
                /\ pc' = [pc EXCEPT ![SenderCloseID] = "sender_notify_closed"]
                /\ UNCHANGED << ReceiverLive, Buffer, NotifyWrite, DataReadyInt, 
                                NotifyRead, SpaceAvailableInt, free, msg, Sent, 
-                               have, want, Got >>
+                               have, Got >>
 
 sender_notify_closed == /\ pc[SenderCloseID] = "sender_notify_closed"
                         /\ DataReadyInt' = TRUE
@@ -496,28 +504,22 @@ sender_notify_closed == /\ pc[SenderCloseID] = "sender_notify_closed"
                         /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, 
                                         NotifyWrite, NotifyRead, 
                                         SpaceAvailableInt, free, msg, Sent, 
-                                        have, want, Got >>
+                                        have, Got >>
 
 SenderClose == sender_open \/ sender_notify_closed
 
 recv_init == /\ pc[ReceiverReadID] = "recv_init"
              /\ IF ReceiverBlocksFirst
-                   THEN /\ \E n \in 1..MaxReadLen:
-                             want' = n
-                        /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_await_data"]
+                   THEN /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_await_data"]
                    ELSE /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_ready"]
-                        /\ want' = want
              /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, NotifyWrite, 
                              DataReadyInt, NotifyRead, SpaceAvailableInt, free, 
                              msg, Sent, have, Got >>
 
 recv_ready == /\ pc[ReceiverReadID] = "recv_ready"
               /\ IF ReceiverLive
-                    THEN /\ \E n \in 1..MaxReadLen:
-                              want' = n
-                         /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_reading"]
+                    THEN /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_reading"]
                     ELSE /\ pc' = [pc EXCEPT ![ReceiverReadID] = "Done"]
-                         /\ want' = want
               /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, NotifyWrite, 
                               DataReadyInt, NotifyRead, SpaceAvailableInt, 
                               free, msg, Sent, have, Got >>
@@ -527,37 +529,38 @@ recv_reading == /\ pc[ReceiverReadID] = "recv_reading"
                 /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_got_len"]
                 /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, NotifyWrite, 
                                 DataReadyInt, NotifyRead, SpaceAvailableInt, 
-                                free, msg, Sent, want, Got >>
+                                free, msg, Sent, Got >>
 
 recv_got_len == /\ pc[ReceiverReadID] = "recv_got_len"
-                /\ IF have >= want
-                      THEN /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_read_data"]
-                           /\ UNCHANGED NotifyWrite
-                      ELSE /\ NotifyWrite' = TRUE
-                           /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_recheck_len"]
+                /\ \/ /\ IF have > 0
+                            THEN /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_read_data"]
+                                 /\ UNCHANGED NotifyWrite
+                            ELSE /\ NotifyWrite' = TRUE
+                                 /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_recheck_len"]
+                   \/ /\ NotifyWrite' = TRUE
+                      /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_recheck_len"]
                 /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, DataReadyInt, 
                                 NotifyRead, SpaceAvailableInt, free, msg, Sent, 
-                                have, want, Got >>
+                                have, Got >>
 
 recv_recheck_len == /\ pc[ReceiverReadID] = "recv_recheck_len"
                     /\ have' = Len(Buffer)
                     /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_read_data"]
                     /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, 
                                     NotifyWrite, DataReadyInt, NotifyRead, 
-                                    SpaceAvailableInt, free, msg, Sent, want, 
-                                    Got >>
+                                    SpaceAvailableInt, free, msg, Sent, Got >>
 
 recv_read_data == /\ pc[ReceiverReadID] = "recv_read_data"
                   /\ IF have > 0
-                        THEN /\ Got' = Got \o Take(Buffer, Min(want, have))
-                             /\ Buffer' = Drop(Buffer, Min(want, have))
-                             /\ want' = 0
+                        THEN /\ \E len \in 1..have:
+                                  /\ Got' = Got \o Take(Buffer, len)
+                                  /\ Buffer' = Drop(Buffer, len)
                              /\ have' = 0
                              /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_check_notify_read"]
                         ELSE /\ IF ~SenderLive \/ ~ReceiverLive
                                    THEN /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_final_check"]
                                    ELSE /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_await_data"]
-                             /\ UNCHANGED << Buffer, have, want, Got >>
+                             /\ UNCHANGED << Buffer, have, Got >>
                   /\ UNCHANGED << SenderLive, ReceiverLive, NotifyWrite, 
                                   DataReadyInt, NotifyRead, SpaceAvailableInt, 
                                   free, msg, Sent >>
@@ -571,21 +574,19 @@ recv_check_notify_read == /\ pc[ReceiverReadID] = "recv_check_notify_read"
                           /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, 
                                           NotifyWrite, DataReadyInt, 
                                           SpaceAvailableInt, free, msg, Sent, 
-                                          have, want, Got >>
+                                          have, Got >>
 
 recv_notify_read == /\ pc[ReceiverReadID] = "recv_notify_read"
                     /\ SpaceAvailableInt' = TRUE
                     /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_ready"]
                     /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, 
                                     NotifyWrite, DataReadyInt, NotifyRead, 
-                                    free, msg, Sent, have, want, Got >>
+                                    free, msg, Sent, have, Got >>
 
 recv_final_check == /\ pc[ReceiverReadID] = "recv_final_check"
                     /\ IF Len(Buffer) = 0
-                          THEN /\ want' = 0
-                               /\ pc' = [pc EXCEPT ![ReceiverReadID] = "Done"]
+                          THEN /\ pc' = [pc EXCEPT ![ReceiverReadID] = "Done"]
                           ELSE /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_reading"]
-                               /\ want' = want
                     /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, 
                                     NotifyWrite, DataReadyInt, NotifyRead, 
                                     SpaceAvailableInt, free, msg, Sent, have, 
@@ -594,12 +595,10 @@ recv_final_check == /\ pc[ReceiverReadID] = "recv_final_check"
 recv_await_data == /\ pc[ReceiverReadID] = "recv_await_data"
                    /\ DataReadyInt \/ ~ReceiverLive
                    /\ IF ~ReceiverLive
-                         THEN /\ want' = 0
-                              /\ pc' = [pc EXCEPT ![ReceiverReadID] = "Done"]
+                         THEN /\ pc' = [pc EXCEPT ![ReceiverReadID] = "Done"]
                               /\ UNCHANGED DataReadyInt
                          ELSE /\ DataReadyInt' = FALSE
                               /\ pc' = [pc EXCEPT ![ReceiverReadID] = "recv_reading"]
-                              /\ want' = want
                    /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, 
                                    NotifyWrite, NotifyRead, SpaceAvailableInt, 
                                    free, msg, Sent, have, Got >>
@@ -614,14 +613,14 @@ recv_open == /\ pc[ReceiverCloseID] = "recv_open"
              /\ pc' = [pc EXCEPT ![ReceiverCloseID] = "recv_notify_closed"]
              /\ UNCHANGED << SenderLive, Buffer, NotifyWrite, DataReadyInt, 
                              NotifyRead, SpaceAvailableInt, free, msg, Sent, 
-                             have, want, Got >>
+                             have, Got >>
 
 recv_notify_closed == /\ pc[ReceiverCloseID] = "recv_notify_closed"
                       /\ SpaceAvailableInt' = TRUE
                       /\ pc' = [pc EXCEPT ![ReceiverCloseID] = "Done"]
                       /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, 
                                       NotifyWrite, DataReadyInt, NotifyRead, 
-                                      free, msg, Sent, have, want, Got >>
+                                      free, msg, Sent, have, Got >>
 
 ReceiverClose == recv_open \/ recv_notify_closed
 
@@ -632,7 +631,7 @@ spurious == /\ pc[SpuriousID] = "spurious"
                   /\ UNCHANGED SpaceAvailableInt
             /\ pc' = [pc EXCEPT ![SpuriousID] = "spurious"]
             /\ UNCHANGED << SenderLive, ReceiverLive, Buffer, NotifyWrite, 
-                            NotifyRead, free, msg, Sent, have, want, Got >>
+                            NotifyRead, free, msg, Sent, have, Got >>
 
 SpuriousInterrupts == spurious
 
@@ -708,7 +707,6 @@ TypeOK ==
   /\ SpaceAvailableInt \in BOOLEAN
   /\ free \in 0..BufferSize
   /\ msg \in FINITE_MESSAGE(MaxWriteLen)
-  /\ want \in 0..MaxReadLen
   /\ have \in 0..BufferSize
 
 (* Whatever we receive is the same as what was sent.
@@ -809,10 +807,6 @@ IntegrityI ==
   /\ free <= BufferSize - Len(Buffer)
   /\ pc[SenderWriteID] \in {"sender_write", "sender_request_notify", "sender_recheck_len",
                             "sender_write_data", "sender_blocked", "sender_check_recv_live"} => msg /= << >>
-  \* If we're at a point in the code where the variable `want' (the number of bytes the receiving
-  \* application wants to read) is active, it can't be zero. Otherwise, it is always zero.
-  /\ want = 0 <=> pc[ReceiverReadID] \in {"recv_check_notify_read", "recv_notify_read",
-                                       "recv_init", "recv_ready", "recv_notify_read", "Done"}
   \* `have' is only used in these states:
   /\ pc[ReceiverReadID] \in {"recv_got_len", "recv_recheck_len", "recv_read_data"} \/ have = 0
   \* `free` is only used in these states:
@@ -849,15 +843,14 @@ ReaderInfoAccurate ==
   \* In these states we're going to check the buffer before blocking, so
   \* we don't have any information to be out-of-date:
   \/ pc[ReceiverReadID] \in {"recv_ready", "recv_reading",
-                             "recv_recheck_len",
+                             "recv_got_len", "recv_recheck_len",
                              "recv_check_notify_read", "recv_notify_read", "recv_final_check",
                              "Done"}  \* (if we're Done then we don't care)
-  \/ pc[ReceiverReadID] \in {"recv_got_len"} /\ have < want   \* Will recheck
   \* If we've been signalled, we'll immediately wake and check again even if we try to block:
   \/ DataReadyInt
   \* If we know there are some bytes in the buffer, we'll read them and return
   \* without blockig:
-  \/ pc[ReceiverReadID] \in {"recv_got_len", "recv_read_data"} /\ have > 0
+  \/ pc[ReceiverReadID] \in {"recv_read_data"} /\ have > 0
 
 (* The notify flags are set correctly.
    If we're on a path to block, then we must have set our notify flag.
@@ -935,7 +928,6 @@ TypeOKI ==
   /\ NotifyRead \in BOOLEAN
   /\ SpaceAvailableInt \in BOOLEAN
   /\ free \in 0..BufferSize
-  /\ want \in 0..MaxReadLen
   /\ have \in 0..BufferSize
 
 -----------------------------------------------------------------------------
@@ -1042,7 +1034,6 @@ LEMMA LengthFacts ==
          /\ BufferSize \in Nat \ {0}
          /\ MaxWriteLen \in Nat
          /\ MaxReadLen \in Nat
-         /\ want \in 0..MaxReadLen
          /\ BufferSize - Len(Buffer) \in 0..BufferSize
          /\ \A n \in Nat : \A m \in FINITE_MESSAGE(n) : Len(m) \in 0..n
          /\ \A m \in MESSAGE : Len(m) \in Nat
@@ -1362,16 +1353,7 @@ LEMMA ReceiverReadPreservesI ==
       <2> TypeOK' BY DEF TypeOK
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI' BY DEF IntegrityI
-      <2> NotifyFlagsCorrect'
-          <3> CASE have < want
-              \* We just set the flag, so it must be OK.
-              <4> pc'[ReceiverReadID] = "recv_recheck_len" BY DEF PCOK, TypeOK
-              <4> QED BY DEF NotifyFlagsCorrect, I, CloseOK
-          <3> CASE have >= want
-              \* We're not going to block, so no need to set the flag.
-              <4> want /= 0 BY DEF IntegrityI
-              <4> QED BY DEF I, NotifyFlagsCorrect, TypeOK, CloseOK
-          <3> QED BY DEF TypeOK
+      <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
       <2> ASSUME NotifyWrite'
           PROVE  \/ ReaderInfoAccurate'
                  \/ pc[SenderWriteID] \in {"sender_check_notify_data"}
@@ -1381,7 +1363,6 @@ LEMMA ReceiverReadPreservesI ==
       <2> USE <1>4 DEF recv_recheck_len
       <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >> BY DEF PCOK
       <2> pc'[ReceiverReadID] = "recv_read_data" BY DEF PCOK
-      <2> want \in 1..MaxReadLen BY LengthFacts DEF IntegrityI
       <2> have' \in 0..BufferSize BY LengthFacts, have' >= 0 DEF Min
       <2> TypeOK' BY DEF TypeOK
       <2> PCOK' BY DEF PCOK
@@ -1393,16 +1374,17 @@ LEMMA ReceiverReadPreservesI ==
       <2> USE <1>5a DEF recv_read_data
       <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >> BY DEF PCOK
       <2> pc'[ReceiverReadID] = "recv_check_notify_read" BY DEF PCOK
-      <2> DEFINE len == Min(want, have)
       <2> /\ TypeOK'
           /\ UNCHANGED (Got \o Buffer)
           /\ Len(Buffer') < Len(Buffer)
-          <3> want >= 1 BY DEF IntegrityI, TypeOK
-          <3> len \in 1..Len(Buffer) BY DEF IntegrityI, TypeOK, Min
+          <3> PICK len \in 1..have :
+                  /\ Got' = Got \o Take(Buffer, len)
+                  /\ Buffer' = Drop(Buffer, len)
+              OBVIOUS
+          <3> len \in 1..Len(Buffer) BY DEF IntegrityI, TypeOK
           <3> TransferResults(Buffer, Buffer', Got, Got', len)
               <4> Got' = Got \o Take(Buffer, len) OBVIOUS
               <4> Buffer' = Drop(Buffer, len) OBVIOUS
-              <4> HIDE DEF len
               <4> QED BY TransferFacts, FiniteMessageFacts DEF TypeOK
           <3> DEFINE lb1 == Len(Buffer)
           <3> DEFINE lb2 == Len(Buffer')
@@ -1410,13 +1392,12 @@ LEMMA ReceiverReadPreservesI ==
           <3> lb1 \in Nat /\ lb2 \in Nat BY DEF TypeOK
           <3> SUFFICES lb2 < lb1
               BY LengthFacts, FiniteMessageFacts DEF TypeOK, TransferResults
-          <3> HIDE DEF lb1, lb2, len
+          <3> HIDE DEF lb1, lb2
           <3> QED OBVIOUS
       <2> PCOK' BY DEF PCOK
       <2> IntegrityI'
         <3> free <= BufferSize - Len(Buffer') BY BufferSizeType DEF TypeOK, IntegrityI
         <3> QED BY DEF IntegrityI
-      <2> want /= 0 BY DEF IntegrityI, TypeOK
       <2> NotifyFlagsCorrect' BY DEF NotifyFlagsCorrect, I
       <2> QED BY DEF I, SenderInfoAccurate, ReaderInfoAccurate, CloseOK
 <1>5b. CASE recv_read_data /\ have = 0
@@ -1551,7 +1532,6 @@ THEOREM Spec => []I
 BY AlwaysI DEF Spec
 
 -----------------------------------------------------------------------------
-
 \* Deadlock
 
 (* We can't get into a state where the sender and receiver are both blocked
@@ -1708,9 +1688,13 @@ THEOREM ReceiverReadPreservesReadLimit ==
       <2> USE <1>1
       <2> USE DEF recv_read_data
       <2> CASE have > 0
-          <3> Min(want, have) \in 1..Len(Buffer) BY DEF TypeOK, IntegrityI, Min
+          <3> PICK len \in 1..have :
+                  /\ Got' = Got \o Take(Buffer, len)
+                  /\ Buffer' = Drop(Buffer, len)
+              OBVIOUS
+          <3> len \in 1..Len(Buffer) BY DEF TypeOK, IntegrityI
           <3> Buffer \in MESSAGE BY FiniteMessageFacts DEF TypeOK
-          <3> Take(Buffer, Min(want, have)) \o Drop(Buffer, Min(want, have)) = Buffer
+          <3> Take(Buffer, len) \o Drop(Buffer, len) = Buffer
               BY TakeDropFacts
           <3> UNCHANGED (Got \o Buffer) BY DEF TypeOK
           <3> QED BY DEF ReadLimit
@@ -1746,22 +1730,18 @@ THEOREM ReceiverReadPreservesReadLimit ==
                 <5> QED OBVIOUS
           <4> CASE have' = 0 /\ ~DataReadyInt
                 <5> ReadLimit' = Len(Got) BY DEF ReadLimit
-                <5> want /= 0 BY DEF IntegrityI
-                <5> Len(Buffer) = 0 BY LengthFacts DEF Min
+                <5> Len(Buffer) = 0 BY LengthFacts
                 <5> QED OBVIOUS
           <4> QED BY have' >= 0 DEF TypeOK
     <2>6. CASE recv_got_len
           <3> USE <2>6 DEF recv_got_len
           <3> ReadLimit = Len(Got) + Len(Buffer) BY DEF ReadLimit
-          <3> CASE have >= want
-              <4> want > 0 BY DEF IntegrityI, TypeOK
+          <3> CASE pc'[ReceiverReadID] = "recv_read_data"
               <4> have > 0 BY DEF TypeOK
-              <4> pc'[ReceiverReadID] = "recv_read_data" BY DEF PCOK
               <4> QED BY DEF ReadLimit
-          <3> CASE have < want
-              <4> pc'[ReceiverReadID] = "recv_recheck_len" BY DEF PCOK, TypeOK
+          <3> CASE pc'[ReceiverReadID] = "recv_recheck_len"
               <4> QED BY DEF ReadLimit
-          <3> QED BY have' >= 0 DEF TypeOK
+          <3> QED BY DEF TypeOK, PCOK
     <2>7. CASE recv_init BY <2>7 DEF recv_init, ReadLimit, PCOK
     <2> QED BY <2>1, <2>2, <2>3, <2>4, <2>5, <2>6, <2>7 DEF ReceiverRead
 <1> QED BY <1>1, <1>2 DEF SenderWrite
@@ -2050,8 +2030,11 @@ LEMMA RecvTransferWriteLimit ==
 <1> TypeOK' BY NextPreservesI, I', IntegrityI' DEF Next, ReceiverRead, I, IntegrityI
 <1> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >>
     BY DEF recv_read_data, PCOK
-<1> DEFINE len == Min(want, have)
-<1> len \in 1..Len(Buffer) BY want >= 1 DEF IntegrityI, TypeOK, Min
+<1> PICK len \in 1..have :
+            /\ Got' = Got \o Take(Buffer, len)
+            /\ Buffer' = Drop(Buffer, len)
+    OBVIOUS
+<1> len \in 1..Len(Buffer) BY DEF IntegrityI, TypeOK
 <1> TransferResults(Buffer, Buffer', Got, Got', len)
     BY TransferFacts, FiniteMessageFacts DEF TypeOK
 <1> UNCHANGED (Len(Got) + Len(Buffer))
@@ -2066,9 +2049,7 @@ LEMMA RecvTransferWriteLimit ==
 <1> DEFINE lb2 == Len(Buffer')
 <1> DEFINE lm  == Len(msg)
 <1> lb2 = lb1 - len BY DEF TransferResults
-<1> lb2 < lb1
-    <2> HIDE DEF len
-    <2> QED BY LengthFacts
+<1> lb2 < lb1 BY LengthFacts
 <1> lg1 + lb1 = lg2 + lb2 OBVIOUS
 <1> lg2 > lg1 OBVIOUS
 <1> /\ lg1 \in Nat
@@ -2152,7 +2133,6 @@ LEMMA RecvTransferWriteLimit ==
                     BY DEF IntegrityI
                 <5> CASE /\ pc[SenderWriteID] \in {"sender_write_data"}
                          /\ Len(Buffer') + free = BufferSize
-                    <6> HIDE DEF len
                     <6> Len(Buffer) + free < BufferSize
                         <7> Len(Buffer) + free /= BufferSize BY LengthFacts DEF TypeOK
                         <7> free <= BufferSize - Len(Buffer) BY DEF IntegrityI
