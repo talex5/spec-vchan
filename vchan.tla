@@ -1626,8 +1626,9 @@ ReadLimitCorrect ==
 (* Whenever the sender is blocked or idle, the receiver can read everything in
    the buffer without further action from any other process. *)
 THEOREM ReadAllIfSenderBlocked ==
-  ASSUME I, SenderLive, ReceiverLive, ~SpaceAvailableInt,
-         pc[SenderWriteID] \in {"sender_ready", "sender_blocked"}
+  ASSUME I, SenderLive, ReceiverLive,
+         \/ pc[SenderWriteID] = "sender_ready"
+         \/ pc[SenderWriteID] = "sender_blocked" /\ ~SpaceAvailableInt
   PROVE  ReadLimit = Len(Got) + Len(Buffer)
 <1> IntegrityI BY DEF I
 <1> PCOK BY DEF IntegrityI
