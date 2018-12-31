@@ -18,6 +18,6 @@ tlaps:
 # Generate a PDF file from a .tla file
 %.pdf: %.tla
 	[ -d metadir ] || mkdir metadir
-	${TLA} java tla2tex.TLA -shade -latexCommand pdflatex -latexOutputExt pdf -metadir metadir $<
+	${TLA} java tla2tex.TLA -noPcalShade -shade -latexCommand pdflatex -latexOutputExt pdf -metadir metadir $<
 
 pdfs: vchan.pdf

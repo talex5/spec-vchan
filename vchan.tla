@@ -151,7 +151,7 @@ SpuriousID       == "SP"   \* Spurious interrupts from the other direction
    3. If there isn't any, we set NotifyWrite so the sender will notify us when there is.
       We also check the space again after this, in case it changed while setting the flag.
    4. If there is some data, we read some or all of it.
-      If the NotifyRead flag is set, we clear it and notify the receiver of the new space.
+      If the NotifyRead flag is set, we clear it and notify the sender of the new space.
       We return the data read to the application.
    5. Otherwise, we check whether the sender has closed the connection.
       If it has, we check the buffer again in case data was added after we checked.
