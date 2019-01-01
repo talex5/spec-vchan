@@ -1549,17 +1549,15 @@ THEOREM DeadlockFree1 ==
              PROVE  FALSE
     OBVIOUS
 <1> NotifyFlagsCorrect BY DEF I
-<1> CASE ~NotifyRead BY DEF NotifyFlagsCorrect
-<1> CASE ~NotifyWrite
-    <2> have /= 0 BY DEF NotifyFlagsCorrect
-    <2> QED BY DEF IntegrityI, I
-<1> CASE NotifyRead /\ NotifyWrite
-    <2> SenderInfoAccurate /\ ReaderInfoAccurate BY DEF I
-    <2> free = 0 BY DEF IntegrityI, I
-    <2> Len(Buffer) = BufferSize BY DEF SenderInfoAccurate
-    <2> Len(Buffer) = 0 BY DEF ReaderInfoAccurate
-    <2> QED BY BufferSizeType
-<1> QED OBVIOUS
+<1> NotifyRead BY DEF NotifyFlagsCorrect
+<1> NotifyWrite
+    <2> have = 0 BY DEF IntegrityI, I
+    <2> QED BY DEF NotifyFlagsCorrect
+<1> SenderInfoAccurate /\ ReaderInfoAccurate BY DEF I
+<1> free = 0 BY DEF IntegrityI, I
+<1> Len(Buffer) = BufferSize BY DEF SenderInfoAccurate
+<1> Len(Buffer) = 0 BY DEF ReaderInfoAccurate
+<1> QED BY BufferSizeType
 
 (* We can't get into a state where the sender is idle and the receiver is blocked
    unless the buffer is empty (all data sent has been consumed): *)
