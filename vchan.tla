@@ -66,7 +66,7 @@ This specification is organised as follows:
 
 ------------------------------- MODULE vchan -------------------------------
 
-EXTENDS Naturals, Sequences, TLAPS, SequenceTheorems
+EXTENDS Naturals, NaturalsInduction, Sequences, TLAPS, SequenceTheorems
 
 CONSTANT Byte           \* 0..255, but overridable for modelling purposes.
 
@@ -91,7 +91,7 @@ ASSUME MaxReadLenType == MaxReadLen \in Nat
    only if the buffer is empty. However, some applications (e.g. QubesDB) block first
    without checking the buffer. *)
 CONSTANT ReceiverBlocksFirst
-ASSUME ReceiverBlocksFirst \in BOOLEAN
+ASSUME ReceiverBlocksFirstType == ReceiverBlocksFirst \in BOOLEAN
 
 Min(x, y) == IF x < y THEN x ELSE y
 
@@ -721,7 +721,8 @@ AvailabilityNat == Nat    \* Just to allow overriding it in TLC
    be received (if the receiver doesn't close the connection).
    In particular, this says that it's OK for the sender to close its
    end immediately after sending some data.
-   Note that this is not currently true of the C implementation. *)
+   Note that this is not currently true of the C implementation.
+   TODO: should also check that the sender is able to reach this state in all cases. *)
 Availability ==
   \A x \in AvailabilityNat :
     x = Len(Sent) /\ SenderLive /\ pc[SenderWriteID] = "sender_ready"
@@ -759,6 +760,7 @@ PCOK == pc \in [
      - BufferSize = 2
      - MaxReadLen = 2
      - MaxWriteLen = 2
+     - ReceiverBlocksFirst = FALSE
      - Byte = 0..5
 
    Definition Overrides:
@@ -1628,10 +1630,18 @@ THEOREM DeadlockFree2 ==
     <2> QED OBVIOUS
 <1> QED OBVIOUS
 
-(* TLAPS currently can't prove liveness facts.
-   However, if we don't end up forever in a behaviour with both processes blocked,
-   then some process must keep getting signalled. We only send signals after making
-   progress, so lack of deadlock implies progress. *)
+(* A more useful version of Spec for use in temporal proofs.
+   It replaces Init with []I. *)
+ISpec ==
+  /\ [][Next]_vars
+  /\ []I
+  /\ WF_vars((pc[SenderWriteID] # "sender_ready") /\ SenderWrite)
+  /\ WF_vars((pc[SenderCloseID] # "sender_open") /\ SenderClose)
+  /\ WF_vars(ReceiverRead)
+  /\ WF_vars((pc[ReceiverCloseID] # "recv_open") /\ ReceiverClose)
+
+THEOREM SpecToISpec == Spec => ISpec
+BY AlwaysI DEF Spec, ISpec
 
 -----------------------------------------------------------------------------
 
@@ -1806,15 +1816,15 @@ THEOREM ReceiverReadPreservesReadLimit ==
 
 (* ReadLimit never decreases (unless the receiver decides to close the connection). *)
 THEOREM ReadLimitMonotonic ==
-  ASSUME I, Next, ReceiverLive
-  PROVE  ReadLimit' >= ReadLimit
+  ASSUME I, [Next]_vars, ReceiverLive
+  PROVE  ReadLimit' \in Nat /\ ReadLimit' >= ReadLimit
 <1> IntegrityI BY DEF I
 <1> TypeOK BY DEF IntegrityI
 <1> PCOK BY DEF IntegrityI
 <1> TypeOK' BY NextPreservesI, I', IntegrityI' DEF I, IntegrityI
 <1> USE LengthFacts
 <1> ReadLimit \in Nat BY DEF ReadLimit, PCOK
-<1> SUFFICES ReadLimit' >= ReadLimit \/ UNCHANGED ReadLimit OBVIOUS
+<1> SUFFICES ReadLimit' \in Nat /\ (ReadLimit' >= ReadLimit \/ UNCHANGED ReadLimit) OBVIOUS
 <1>1. CASE SenderWrite
       <2> USE <1>1
       <2> Min(Len(msg), free) \in 0..Len(msg) BY DEF Min, TypeOK
@@ -1867,6 +1877,603 @@ THEOREM ReadLimitMonotonic ==
     <2> QED OBVIOUS
 <1>6. CASE UNCHANGED vars BY <1>6 DEF ReadLimit, vars
 <1> QED BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6 DEF Next
+
+(* Like ISpec, but ensures reader doesn't close the connection (we can't prove
+   much if it does) and it only requires fairness of the receiver. *)
+RSpec ==
+  /\ [][Next]_vars
+  /\ []I
+  /\ []ReceiverLive
+  /\ WF_vars(ReceiverRead)
+
+(* RDist(n, i) says that we are within i bytes of having read the first n bytes.
+   Our goal is to show that RDist(n, i) ~> RDist(n, 0). *)
+RDist(n, i) == ReadLimit >= n /\ Len(Got) + i >= n
+
+LEMMA ReadLimitType ==
+  ASSUME I
+  PROVE /\ ReadLimit \in Nat
+        /\ Len(Got) \in Nat
+<1> TypeOK /\ PCOK BY PTL DEF RSpec, I, IntegrityI
+<1> QED BY LengthFacts DEF ReadLimit, PCOK
+
+LEMMA MonotonicLenGot ==
+  ASSUME [Next]_vars, IntegrityI, TypeOK
+  PROVE  Len(Got)' >= Len(Got) /\ Len(Got)' \in Nat
+<1> Len(Got) \in Nat BY LengthFacts
+<1> CASE recv_read_data
+    <2> CASE have > 0
+        <3> have <= Len(Buffer) BY DEF IntegrityI
+        <3> PICK len \in 1..have : Got' = Got \o Take(Buffer, len) BY DEF recv_read_data
+        <3> len \in 1..Len(Buffer) BY LengthFacts DEF TypeOK
+        <3> Len(Take(Buffer, len)) \in Nat BY TakeDropFacts, LengthFacts
+        <3> Len(Got') >= Len(Got) OBVIOUS
+        <3> QED BY LengthFacts
+    <2> QED BY DEF recv_read_data
+<1> CASE ~recv_read_data
+    <2> UNCHANGED Got
+      BY DEF Next, vars, SenderWrite, SenderClose, ReceiverRead, ReceiverClose, SpuriousInterrupts,
+             spurious,
+             recv_open, recv_notify_closed, recv_init, recv_ready, recv_reading, recv_got_len, recv_recheck_len,
+             recv_read_data, recv_check_notify_read, recv_notify_read, recv_final_check, recv_await_data,
+             sender_open, sender_notify_closed,
+             sender_ready, sender_write, sender_request_notify, sender_recheck_len, sender_write_data,
+             sender_check_notify_data, sender_notify_data, sender_blocked, sender_check_recv_live
+    <2> QED OBVIOUS
+<1> QED OBVIOUS
+
+LEMMA ReadLimitAlwaysMonotonic ==
+  ASSUME NEW n \in Nat
+  PROVE  RSpec /\ ReadLimit >= n => [](ReadLimit >= n)
+<1> DEFINE COND == ReadLimit >= n
+<1>   I /\   ReceiverLive /\   [Next]_vars /\ COND => COND' BY ReadLimitMonotonic, ReadLimitType
+<1> []I /\ []ReceiverLive /\ [][Next]_vars /\ COND => [](COND) BY PTL
+<1> QED BY PTL DEF RSpec
+
+(* If we're within (i+1) bytes of success, we'll always be within (i+1) bytes.
+   It would be more logical to prove this for i rather than for (i+1),
+   but TLAPS struggles to use the i proof. *)
+LEMMA AlwaysRDist ==
+  ASSUME NEW n \in Nat, NEW i \in Nat
+  PROVE  RSpec /\ RDist(n, i+1) => []RDist(n, i+1)
+<1> SUFFICES ASSUME []RSpec
+             PROVE RDist(n, i+1) => []RDist(n, i+1)
+    BY PTL DEF RSpec
+<1> I /\ [Next]_vars BY PTL DEF RSpec
+<1> ReadLimit >= n => [](ReadLimit >= n) BY PTL, ReadLimitAlwaysMonotonic
+<1> Len(Got) + (i + 1) >= n => [](Len(Got) + (i + 1) >= n)
+    <2> DEFINE C == Len(Got) + (i + 1) >= n
+    <2> C => C'
+        <3> SUFFICES ASSUME Len(Got) + (i + 1) >= n
+                     PROVE  Len(Got') + (i + 1) >= n OBVIOUS
+        <3> Len(Got)' >= Len(Got) /\ Len(Got)' \in Nat BY MonotonicLenGot DEF I, IntegrityI
+        <3> Len(Got) \in Nat BY PTL, ReadLimitType
+        <3> QED OBVIOUS
+    <2> QED BY PTL
+<1> QED BY PTL DEF RDist
+
+(* Possible next values for PC in the ReceiverRead process. *)
+NextPC_recv(s) ==
+  IF s = "recv_init" THEN {"recv_await_data", "recv_ready"}
+  ELSE IF s = "recv_ready" THEN {"recv_reading", "Done"}
+  ELSE IF s = "recv_reading" THEN {"recv_got_len"}
+  ELSE IF s = "recv_got_len" THEN {"recv_read_data", "recv_recheck_len"}
+  ELSE IF s = "recv_recheck_len" THEN {"recv_read_data"}
+  ELSE IF s = "recv_read_data" THEN {"recv_check_notify_read", "recv_final_check", "recv_await_data"}
+  ELSE IF s = "recv_final_check" THEN {"recv_reading", "Done"}
+  ELSE IF s = "recv_await_data" THEN {"recv_reading", "Done"}
+  ELSE IF s = "recv_check_notify_read" THEN {"recv_notify_read", "recv_ready"}
+  ELSE {"recv_ready"}
+
+LEMMA NextPC_recv_correct ==
+  ASSUME I, ReceiverRead,
+         NEW s \in {"recv_init", "recv_ready", "recv_reading", "recv_got_len", "recv_recheck_len",
+         "recv_read_data", "recv_final_check", "recv_await_data",
+         "recv_check_notify_read", "recv_notify_read", "Done"}
+  PROVE pc[ReceiverReadID] = s => pc'[ReceiverReadID] \in NextPC_recv(s)
+<1> DEFINE PC == pc[ReceiverReadID]
+<1> TypeOK /\ PCOK BY DEF I, IntegrityI
+<1> USE DEF NextPC_recv, PCOK
+<1>1 CASE recv_init BY <1>1 DEF recv_init
+<1>2 CASE recv_ready BY <1>2 DEF recv_ready
+<1>3 CASE recv_reading BY <1>3 DEF recv_reading
+<1>4 CASE recv_got_len BY <1>4 DEF recv_got_len
+<1>5 CASE recv_recheck_len BY <1>5 DEF recv_recheck_len
+<1>6 CASE recv_read_data BY <1>6 DEF recv_read_data
+<1>7 CASE recv_final_check BY <1>7 DEF recv_final_check
+<1>8 CASE recv_await_data BY <1>8 DEF recv_await_data
+<1>9 CASE recv_check_notify_read BY <1>9 DEF recv_check_notify_read
+<1>10 CASE recv_notify_read BY <1>10 DEF recv_notify_read
+<1> QED BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, <1>7, <1>8, <1>9, <1>10 DEF ReceiverRead
+
+(* For each PC value, there is only one possible step we can take. *)
+RecvStep(s) ==
+  IF s = "recv_init" THEN recv_init
+  ELSE IF s = "recv_ready" THEN recv_ready
+  ELSE IF s = "recv_reading" THEN recv_reading
+  ELSE IF s = "recv_got_len" THEN recv_got_len
+  ELSE IF s = "recv_recheck_len" THEN recv_recheck_len
+  ELSE IF s = "recv_read_data" THEN recv_read_data
+  ELSE IF s = "recv_final_check" THEN recv_final_check
+  ELSE IF s = "recv_await_data" THEN recv_await_data
+  ELSE IF s = "recv_check_notify_read" THEN recv_check_notify_read
+  ELSE recv_notify_read
+
+LEMMA RecvStep_correct ==
+  ASSUME I, ReceiverRead,
+         NEW s \in {"recv_init", "recv_ready", "recv_reading", "recv_got_len", "recv_recheck_len",
+         "recv_read_data", "recv_final_check", "recv_await_data",
+         "recv_check_notify_read", "recv_notify_read", "Done"}
+  PROVE pc[ReceiverReadID] = s => RecvStep(s)
+<1> PCOK BY DEF I, IntegrityI
+<1> QED BY DEF ReceiverRead, RecvStep, PCOK,
+               recv_init, recv_ready, recv_reading, recv_got_len, recv_recheck_len, recv_read_data,
+               recv_final_check, recv_await_data, recv_check_notify_read, recv_notify_read
+
+(* Says when the ReceiverRead action is enabled
+   (we block at recv_await_data if no interrupt has been sent). *)
+LEMMA Enabled_ReceiverRead ==
+  ASSUME I, ReceiverLive,
+         pc[ReceiverReadID] # "Done",
+         pc[ReceiverReadID] = "recv_await_data" => DataReadyInt
+  PROVE  ENABLED <<ReceiverRead>>_vars
+<1> DEFINE PC == pc[ReceiverReadID]
+<1> TypeOK /\ PCOK BY DEF I, IntegrityI
+<1> SUFFICES ENABLED ReceiverRead
+    <2> <<ReceiverRead>>_vars <=> ReceiverRead
+        <3> SUFFICES ASSUME ReceiverRead PROVE vars # vars' OBVIOUS
+        <3> PC # PC' BY NextPC_recv_correct DEF NextPC_recv, PCOK
+        <3> QED BY DEF vars
+    <2> (ENABLED <<ReceiverRead>>_vars) <=> (ENABLED ReceiverRead) BY ENABLEDaxioms
+    <2> QED OBVIOUS
+<1>0 CASE PC = "recv_init" BY AutoUSE, ExpandENABLED, <1>0
+<1>1 CASE PC = "recv_ready" BY AutoUSE, ExpandENABLED, <1>1
+<1>2 CASE PC = "recv_reading" BY AutoUSE, ExpandENABLED, <1>2
+<1>3 CASE PC = "recv_got_len" BY AutoUSE, ExpandENABLED, <1>3
+<1>4 CASE PC = "recv_recheck_len" BY AutoUSE, ExpandENABLED, <1>4
+<1>5 CASE PC = "recv_read_data"
+     <2> CASE have > 0
+         <3> have <= Len(Buffer) BY DEF I, IntegrityI
+         <3> USE DEF TypeOK
+         <3> \E len \in 1..have, Got2 \in MESSAGE, Buffer2 \in MESSAGE:
+                  /\ Got2 = Got \o Take(Buffer, len)
+                  /\ Buffer2 = Drop(Buffer, len)
+             <4> WITNESS 1 \in 1..have
+             <4> Got \in MESSAGE /\ Buffer \in MESSAGE BY LengthFacts
+             <4> 1 \in 0..Len(Buffer) BY LengthFacts
+             <4> QED BY TakeDropFacts, ConcatFacts
+         <3> QED BY AutoUSE, ExpandENABLED, <1>5
+     <2> CASE ~(have > 0) BY AutoUSE, ExpandENABLED, <1>5
+     <2> QED BY DEF TypeOK
+<1>6 CASE PC = "recv_final_check" BY AutoUSE, ExpandENABLED, <1>6
+<1>7 CASE PC = "recv_await_data" BY AutoUSE, ExpandENABLED, <1>7
+<1>8 CASE PC = "recv_check_notify_read" BY AutoUSE, ExpandENABLED, <1>8 DEF TypeOK
+<1>9 CASE PC = "recv_notify_read" BY AutoUSE, ExpandENABLED, <1>9
+<1> QED BY <1>0, <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, <1>7, <1>8, <1>9 DEF PCOK
+
+(* Only ReceiverRead steps change the ReceiverRead PC or its private variables. *)
+LEMMA ReceiverReadPrivate ==
+  PCOK /\ [Next]_vars => [ReceiverRead]_<<pc[ReceiverReadID], have, Got>>
+<1> SUFFICES ASSUME PCOK, Next
+             PROVE [ReceiverRead]_<<pc[ReceiverReadID], have, Got>>
+    BY DEF vars, Next
+<1>1 CASE ReceiverRead BY <1>1
+<1>2 ASSUME ~ReceiverRead PROVE UNCHANGED <<pc[ReceiverReadID], have, Got>>
+    <2> USE <1>2 DEF PCOK
+    <2>1 CASE SenderWrite BY <2>1 DEF SenderWrite, sender_ready, sender_write, sender_request_notify, sender_recheck_len, sender_write_data,
+                 sender_check_notify_data, sender_notify_data, sender_blocked, sender_check_recv_live
+    <2>2 CASE SenderClose BY <2>2 DEF SenderClose, sender_open, sender_notify_closed
+    <2>3 CASE ReceiverClose BY <2>3 DEF ReceiverClose, recv_open, recv_notify_closed
+    <2>4 CASE SpuriousInterrupts BY <2>4 DEF SpuriousInterrupts, spurious
+    <2> QED BY <2>1, <2>2, <2>3, <2>4 DEF Next, vars
+<1> QED BY <1>1, <1>2
+
+(* Now proofs about when each of the receiver steps makes progress. *)
+
+Progress_recv_steps_prop(s) ==
+  RSpec =>
+     pc[ReceiverReadID] = s ~> pc[ReceiverReadID] \in NextPC_recv(s)
+LEMMA Progress_recv_steps ==
+  ASSUME NEW s \in STRING, s \notin {"recv_await_data", "Done"}
+  PROVE  Progress_recv_steps_prop(s)
+<1> DEFINE S == pc[ReceiverReadID] = s
+<1> DEFINE G == pc[ReceiverReadID] \in NextPC_recv(s)
+<1> SUFFICES ASSUME []RSpec PROVE S ~> G BY PTL DEF RSpec, Progress_recv_steps_prop
+<1> ReceiverLive /\ I /\ PCOK BY PTL DEF RSpec, IntegrityI, I
+<1>1 S /\ ReceiverRead => G' BY NextPC_recv_correct DEF NextPC_recv, PCOK
+<1>2 S /\ [Next]_vars => (S \/ G)'
+    <2> CASE ReceiverRead BY <1>1
+    <2> CASE ~ReceiverRead /\ UNCHANGED <<pc[ReceiverReadID], have, Got>>
+        <3> ASSUME S, [Next]_vars, DataReadyInt PROVE DataReadyInt'
+            BY DEF Next, vars, PCOK,
+                   SenderWrite, sender_ready, sender_write, sender_request_notify,
+                    sender_recheck_len, sender_write_data,
+                    sender_check_notify_data, sender_notify_data,
+                    sender_blocked, sender_check_recv_live,
+                   SenderClose, sender_open, sender_notify_closed,
+                   ReceiverClose, recv_open, recv_notify_closed,
+                   SpuriousInterrupts, spurious
+        <3> QED OBVIOUS
+    <2> QED BY ReceiverReadPrivate
+<1>3 S => ENABLED(<<ReceiverRead>>_vars) BY Enabled_ReceiverRead
+<1> QED BY <1>1, <1>2, <1>3, PTL DEF RSpec
+
+(* Expand everything because BY PTL can't handle lots of obvious stuff *)
+LEMMA Progress_recv_steps_expanded ==
+  RSpec =>
+    /\ pc[ReceiverReadID] = "recv_init" ~> pc[ReceiverReadID] = "recv_await_data" \/ pc[ReceiverReadID] = "recv_ready"
+    /\ pc[ReceiverReadID] = "recv_ready" ~> pc[ReceiverReadID] = "recv_reading" \/ pc[ReceiverReadID] = "Done"
+    /\ pc[ReceiverReadID] = "recv_reading" ~> pc[ReceiverReadID] = "recv_got_len"
+    /\ pc[ReceiverReadID] = "recv_got_len" ~> pc[ReceiverReadID] = "recv_read_data" \/ pc[ReceiverReadID] = "recv_recheck_len"
+    /\ pc[ReceiverReadID] = "recv_recheck_len" ~> pc[ReceiverReadID] = "recv_read_data"
+    /\ pc[ReceiverReadID] = "recv_read_data" ~> pc[ReceiverReadID] = "recv_check_notify_read" \/ pc[ReceiverReadID] = "recv_final_check" \/ pc[ReceiverReadID] = "recv_await_data"
+    /\ pc[ReceiverReadID] = "recv_final_check" ~> pc[ReceiverReadID] = "recv_reading" \/ pc[ReceiverReadID] = "Done"
+    /\ pc[ReceiverReadID] = "recv_check_notify_read" ~> pc[ReceiverReadID] = "recv_notify_read" \/ pc[ReceiverReadID] = "recv_ready"
+    /\ pc[ReceiverReadID] = "recv_notify_read" ~> pc[ReceiverReadID] = "recv_ready"
+<1> DEFINE PC == pc[ReceiverReadID]
+<1> /\ Progress_recv_steps_prop("recv_init")
+    /\ Progress_recv_steps_prop("recv_ready")
+    /\ Progress_recv_steps_prop("recv_reading")
+    /\ Progress_recv_steps_prop("recv_got_len")
+    /\ Progress_recv_steps_prop("recv_recheck_len")
+    /\ Progress_recv_steps_prop("recv_read_data")
+    /\ Progress_recv_steps_prop("recv_final_check")
+    /\ Progress_recv_steps_prop("recv_check_notify_read")
+    /\ Progress_recv_steps_prop("recv_notify_read")
+  BY Progress_recv_steps
+<1> /\ PC \in NextPC_recv("recv_init") => PC = "recv_await_data" \/ PC = "recv_ready"
+    /\ PC \in NextPC_recv("recv_ready") => PC = "recv_reading" \/ PC = "Done"
+    /\ PC \in NextPC_recv("recv_reading") => PC = "recv_got_len"
+    /\ PC \in NextPC_recv("recv_got_len") => PC = "recv_read_data" \/ PC = "recv_recheck_len"
+    /\ PC \in NextPC_recv("recv_recheck_len") => PC = "recv_read_data"
+    /\ PC \in NextPC_recv("recv_read_data") => PC = "recv_check_notify_read" \/ PC = "recv_final_check" \/ PC = "recv_await_data"
+    /\ PC \in NextPC_recv("recv_final_check") => PC = "recv_reading" \/ PC = "Done"
+    /\ PC \in NextPC_recv("recv_check_notify_read") => PC = "recv_notify_read" \/ PC = "recv_ready"
+    /\ PC \in NextPC_recv("recv_notify_read") => PC = "recv_ready"
+   BY DEF NextPC_recv
+<1> QED BY PTL DEF Progress_recv_steps_prop
+
+(* Special-case because we also need to show that have > 0 *)
+LEMMA Progress_recv_got_len ==
+  RSpec =>
+  pc[ReceiverReadID] = "recv_got_len" ~>
+    \/ pc[ReceiverReadID] = "recv_read_data" /\ have > 0
+    \/ pc[ReceiverReadID] = "recv_recheck_len"
+<1> DEFINE S == pc[ReceiverReadID] = "recv_got_len"
+<1> DEFINE G == \/ pc[ReceiverReadID] = "recv_read_data" /\ have > 0
+                \/ pc[ReceiverReadID] = "recv_recheck_len"
+<1> SUFFICES ASSUME []RSpec PROVE S ~> G BY PTL DEF RSpec
+<1> ReceiverLive /\ I /\ PCOK BY PTL DEF RSpec, IntegrityI, I
+<1>1 S /\ ReceiverRead => G'
+    <2> SUFFICES ASSUME S, ReceiverRead PROVE G' OBVIOUS
+    <2> recv_got_len BY RecvStep_correct DEF RecvStep, ReceiverRead
+    <2> QED BY DEF recv_got_len, TypeOK, PCOK
+<1>2 S /\ [Next]_vars => (S \/ G)' BY ReceiverReadPrivate, <1>1
+<1>3 S => ENABLED(<<ReceiverRead>>_vars) BY Enabled_ReceiverRead
+<1> QED BY <1>1, <1>2, <1>3, PTL, Progress_recv_steps_expanded DEF RSpec
+
+(* If we're not already at RDist(n, i) then we must see that the buffer is non-empty. *)
+LEMMA Progress_recv_recheck_len ==
+  ASSUME NEW n \in Nat, NEW i \in Nat
+  PROVE
+      RSpec =>
+        pc[ReceiverReadID] = "recv_recheck_len" /\ RDist(n, i+1) /\ ~RDist(n, i) ~>
+        pc[ReceiverReadID] = "recv_read_data" /\ have > 0
+<1> DEFINE X == recv_recheck_len
+<1> DEFINE S == pc[ReceiverReadID] = "recv_recheck_len" /\ RDist(n, i+1) /\ ~RDist(n, i)
+<1> DEFINE G == (pc[ReceiverReadID] = "recv_read_data" /\ have > 0)
+<1> SUFFICES ASSUME []RSpec PROVE S ~> G BY PTL DEF RSpec
+<1> ReceiverLive /\ I /\ PCOK BY PTL DEF RSpec, IntegrityI, I
+<1>1 S /\ ReceiverRead => G'
+    <2> SUFFICES ASSUME S, ReceiverRead PROVE G' OBVIOUS
+    <2> recv_recheck_len BY RecvStep_correct DEF RecvStep, ReceiverRead
+    <2> have' = Len(Buffer) BY DEF recv_recheck_len
+    <2> pc'[ReceiverReadID] = "recv_read_data" BY DEF recv_recheck_len, PCOK
+    <2> CASE have' > 0 BY DEF recv_recheck_len
+    <2> TypeOK /\ TypeOK' BY PTL DEF I, IntegrityI
+    <2> ReadLimit >= n /\ Len(Got) + (i+1) >= n BY DEF RDist
+    <2> SUFFICES ASSUME Len(Buffer) = 0 PROVE FALSE BY DEF TypeOK
+    <2> ReadLimit = Len(Got) BY LengthFacts DEF ReadLimit
+    <2> Len(Got) >= n BY TypeOK
+    <2> Len(Got) + i >= n BY LengthFacts
+    <2> RDist(n, i) BY DEF RDist
+    <2> QED OBVIOUS
+<1>2 S /\ [Next]_vars => (S \/ G)'
+    <2> SUFFICES ASSUME S, [Next]_vars PROVE (S \/ G)' OBVIOUS
+    <2> CASE ReceiverRead BY <1>1
+    <2> CASE UNCHANGED <<pc[ReceiverReadID], have, Got>>
+        <3> RSpec BY PTL
+        <3> [](RDist(n, i+1)) BY AlwaysRDist
+        <3> RDist(n, i+1)' BY PTL
+        <3> QED BY DEF RDist
+    <2> QED BY ReceiverReadPrivate
+<1>3 S => ENABLED(<<ReceiverRead>>_vars) BY Enabled_ReceiverRead
+<1> QED BY <1>1, <1>2, <1>3, PTL DEF RSpec
+
+(* If we haven't reached RDist(n, i) yet then await won't block
+   (by the definition of ReadLimit). *)
+LEMMA Progress_recv_await_data ==
+  ASSUME NEW n \in Nat, NEW i \in Nat
+  PROVE
+      RSpec =>
+        pc[ReceiverReadID] = "recv_await_data" /\ ~RDist(n, i) /\ RDist(n, i+1) ~>
+        pc[ReceiverReadID] = "recv_reading"
+<1> DEFINE S == pc[ReceiverReadID] = "recv_await_data" /\ ~RDist(n, i) /\ RDist(n, i+1)
+<1> DEFINE G == pc[ReceiverReadID] = "recv_reading"
+<1> SUFFICES ASSUME []RSpec PROVE S ~> G BY PTL DEF RSpec
+<1> ReceiverLive /\ I /\ PCOK BY PTL DEF RSpec, IntegrityI, I
+<1>1 S /\ ReceiverRead => G'    
+    <2> SUFFICES ASSUME S, ReceiverRead PROVE G' OBVIOUS
+    <2> recv_await_data BY RecvStep_correct DEF RecvStep, ReceiverRead
+    <2> QED BY DEF recv_await_data, PCOK
+<1>2 S /\ [Next]_vars => (S \/ G)'
+    <2> SUFFICES ASSUME S, UNCHANGED <<pc[ReceiverReadID], Got>> PROVE S'
+        BY <1>1, ReceiverReadPrivate
+    <2> RDist(n, i+1)' BY PTL, AlwaysRDist
+    <2> QED BY DEF RDist
+<1>3 S => ENABLED(<<ReceiverRead>>_vars)
+    <2> SUFFICES ASSUME S, ~DataReadyInt PROVE FALSE BY Enabled_ReceiverRead
+    <2> ReadLimit = Len(Got) BY DEF ReadLimit
+    <2> Len(Got) >= n BY DEF RDist
+    <2> Len(Got) + i >= n BY LengthFacts DEF I, IntegrityI
+    <2> RDist(n, i) BY DEF RDist
+    <2> QED OBVIOUS
+<1> QED BY <1>1, <1>2, <1>3, PTL DEF RSpec
+
+(* Finally; reading actually gets us closer! The main tricky bit is showing that [have]
+   is in-range so we don't crash. *)
+LEMMA Progress_recv_read_data ==
+  ASSUME NEW n \in Nat, NEW i \in Nat
+  PROVE  RSpec =>
+           RDist(n, i+1) /\ pc[ReceiverReadID] = "recv_read_data" /\ have > 0 ~> RDist(n, i)
+<1> DEFINE S == RDist(n, i+1) /\ pc[ReceiverReadID] = "recv_read_data" /\ have > 0
+<1> DEFINE G == RDist(n, i)
+<1> SUFFICES ASSUME []RSpec PROVE S ~> G BY PTL DEF RSpec
+<1> RSpec BY PTL
+<1> S => [](ReadLimit >= n) BY ReadLimitAlwaysMonotonic, PTL DEF RDist
+<1> I /\ IntegrityI /\ TypeOK /\ PCOK /\ ReceiverLive BY PTL DEF RSpec, IntegrityI, I
+<1> [][Next]_vars BY PTL DEF RSpec
+<1>1 ~G /\ S /\ ReceiverRead => G'    
+    <2> SUFFICES ASSUME ~G, S, ReceiverRead PROVE G' OBVIOUS
+    <2> recv_read_data BY RecvStep_correct DEF RecvStep, ReceiverRead
+    <2> pc'[ReceiverReadID] = "recv_check_notify_read" BY DEF recv_read_data, PCOK
+    <2> PICK len \in 1..have:
+              /\ Got' = Got \o Take(Buffer, len)
+              /\ Buffer' = Drop(Buffer, len)
+        BY DEF recv_read_data
+    <2> len > 0 BY DEF TypeOK
+    <2> have <= Len(Buffer) BY DEF IntegrityI
+    <2> len <= Len(Buffer) BY LengthFacts DEF TypeOK
+    <2> Len(Got') = Len(Got) + len BY TakeDropFacts, ConcatFacts, LengthFacts DEF TypeOK
+    <2> ReadLimit = Len(Got) + Len(Buffer) BY DEF ReadLimit
+    <2> ReadLimit' = ReadLimit BY ReceiverReadPreservesReadLimit
+    <2> ReadLimit >= n /\ Len(Got) + (i+1) >= n BY DEF RDist
+    <2> SUFFICES Len(Got') + i >= n BY DEF RDist
+    <2> QED BY LengthFacts
+<1>2 ~G /\ S /\ [Next]_vars => (S \/ G)'
+    <2> SUFFICES ASSUME S, UNCHANGED <<pc[ReceiverReadID], have>> PROVE S'
+        BY <1>1, ReceiverReadPrivate
+    <2> RDist(n, i+1)' BY PTL, AlwaysRDist
+    <2> QED OBVIOUS
+<1>3 S => ENABLED(<<ReceiverRead>>_vars) BY Enabled_ReceiverRead
+<1> QED BY <1>1, <1>2, <1>3, PTL DEF RSpec
+
+(* If there's data to be read then we'll eventually move to the recv_read_data state
+   and be ready to read something (or we'll have read more data). *)
+LEMMA ReaderToReadData ==
+  ASSUME NEW n \in Nat, NEW i \in Nat
+  PROVE RSpec /\ ~RDist(n, i) /\  RDist(n, i+1) ~>
+                  RDist(n, i) \/ (RDist(n, i+1) /\ pc[ReceiverReadID] = "recv_read_data" /\ have > 0)
+<1> DEFINE PC == pc[ReceiverReadID]
+<1> DEFINE B == RDist(n, i)
+<1> DEFINE A == RDist(n, i+1) /\ ~B
+<1> SUFFICES ASSUME []RSpec, []RDist(n, i+1)
+             PROVE  A ~> B \/ (PC = "recv_read_data" /\ have > 0)
+    BY PTL, AlwaysRDist DEF RSpec
+<1> I /\ PCOK /\ TypeOK BY PTL DEF RSpec, I, IntegrityI
+<1> [](A \/ B) BY PTL
+<1> A /\ PC = "Done" => B
+    <2> SUFFICES ASSUME A, PC = "Done" PROVE B OBVIOUS
+    <2> ReadLimit >= n BY DEF RDist
+    <2> ReadLimit = Len(Got) BY DEF ReadLimit, PCOK
+    <2> QED BY LengthFacts, ReadLimitType DEF RDist
+<1> HIDE DEF A
+<1> have = 0 \/ have > 0 BY BufferSizeType DEF TypeOK
+<1> \/ PC = "recv_init"
+    \/ PC = "recv_ready"
+    \/ PC = "recv_reading"
+    \/ PC = "recv_got_len"
+    \/ PC = "recv_recheck_len"
+    \/ PC = "recv_read_data"
+    \/ PC = "recv_final_check"
+    \/ PC = "recv_await_data"
+    \/ PC = "recv_check_notify_read"
+    \/ PC = "recv_notify_read"
+    \/ PC = "Done"
+    BY DEF PCOK
+<1> [Next]_vars BY PTL DEF RSpec
+<1> WF_vars(ReceiverRead) BY PTL DEF RSpec
+<1> QED BY PTL,
+           Progress_recv_steps_expanded,
+           Progress_recv_await_data,
+           Progress_recv_got_len,
+           Progress_recv_recheck_len
+
+(* We'll always get closer to our goal. *)
+LEMMA ReadLimitProgress ==
+  ASSUME NEW n \in Nat, NEW i \in Nat
+  PROVE  RSpec /\ RDist(n, i + 1) ~> RDist(n, i)
+<1> DEFINE M == RDist(n, i+1) /\ pc[ReceiverReadID] = "recv_read_data" /\ have > 0
+<1> RSpec /\ RDist(n, i+1) ~> RDist(n, i) \/ M BY PTL, ReaderToReadData
+<1> RSpec /\ M ~> RDist(n, i) BY PTL, Progress_recv_read_data
+<1> QED BY PTL DEF RSpec
+
+(* If ReadLimit says we can read up to the first n bytes,
+   then we will eventually read at least that many. *)
+LEMMA ReadLimitEventually ==
+  ASSUME NEW n \in Nat
+  PROVE  RSpec /\ ReadLimit >= n ~> Len(Got) >= n
+<2> SUFFICES ASSUME []RSpec, [](ReadLimit >= n) PROVE <>(Len(Got) >= n) BY PTL, ReadLimitAlwaysMonotonic DEF RSpec
+<2> RSpec /\ ReadLimit >= n BY PTL DEF RSpec
+<2> DEFINE R(i) == RDist(n, i) ~> RDist(n, 0)
+<2>b R(0) BY PTL
+<2>i ASSUME NEW i \in Nat
+     PROVE R(i) => R(i+1)
+    <3> RDist(n, i+1) ~> RDist(n, i) BY ReadLimitProgress, PTL
+    <3> R(i) => RDist(n, i) ~> RDist(n, 0) OBVIOUS
+    <3> QED BY PTL DEF RSpec
+<2> \A i \in Nat : R(i)
+    <3> HIDE DEF R
+    <3> QED BY <2>b, <2>i, NatInduction, Isa
+<2> \E i \in Nat : RDist(n, i)
+    <3> SUFFICES \E i \in Nat : Len(Got) + i >= n BY DEF RDist
+    <3> I BY PTL DEF RSpec
+    <3> TypeOK BY DEF I, IntegrityI
+    <3> QED BY LengthFacts
+<2> \A i \in Nat : RDist(n, i) => <>RDist(n, 0)
+    (* The regular solvers can't handle ~> easily, but we only need => <>. *)
+    <3> SUFFICES ASSUME NEW i \in Nat PROVE RDist(n, i) => <>RDist(n, 0) OBVIOUS
+    <3> RDist(n, i) ~> RDist(n, 0) OBVIOUS
+    <3> QED BY PTL
+<2> (\A i \in Nat : RDist(n, i) => <>RDist(n, 0)) =>
+    ((\E i \in Nat : RDist(n, i)) => <>RDist(n, 0))
+    OBVIOUS
+<2> <>RDist(n, 0) OBVIOUS
+<2> TypeOK /\ RDist(n, 0) => Len(Got) >= n BY LengthFacts DEF RDist
+<2> QED BY PTL DEF RSpec, I, IntegrityI
+
+(* Once ReceiverLive is FALSE, it stays that way. *)
+LEMMA ReceiverLiveFinal ==
+  [][Next]_vars => (~ReceiverLive => []~ReceiverLive)
+<1> ASSUME [Next]_vars
+    PROVE ~ReceiverLive => ~ReceiverLive'
+      <2>1. CASE sender_ready BY <2>1 DEF sender_ready
+      <2>2. CASE sender_write BY <2>2 DEF sender_write
+      <2>3. CASE sender_request_notify BY <2>3 DEF sender_request_notify
+      <2>4. CASE sender_recheck_len BY <2>4 DEF sender_recheck_len
+      <2>5. CASE sender_write_data BY <2>5 DEF sender_write_data
+      <2>6. CASE sender_check_notify_data BY <2>6 DEF sender_check_notify_data
+      <2>7. CASE sender_notify_data BY <2>7 DEF sender_notify_data
+      <2>8. CASE sender_blocked BY <2>8 DEF sender_blocked
+      <2>9. CASE sender_check_recv_live BY <2>9 DEF sender_check_recv_live
+      <2>10. CASE sender_open BY <2>10 DEF sender_open
+      <2>11. CASE sender_notify_closed BY <2>11 DEF sender_notify_closed
+      <2>12. CASE recv_init BY <2>12 DEF recv_init
+      <2>13. CASE recv_ready BY <2>13 DEF recv_ready
+      <2>14. CASE recv_reading BY <2>14 DEF recv_reading
+      <2>15. CASE recv_got_len BY <2>15 DEF recv_got_len
+      <2>16. CASE recv_recheck_len BY <2>16 DEF recv_recheck_len
+      <2>17. CASE recv_read_data BY <2>17 DEF recv_read_data
+      <2>18. CASE recv_check_notify_read BY <2>18 DEF recv_check_notify_read
+      <2>19. CASE recv_notify_read BY <2>19 DEF recv_notify_read
+      <2>20. CASE recv_final_check BY <2>20 DEF recv_final_check
+      <2>21. CASE recv_await_data BY <2>21 DEF recv_await_data
+      <2>22. CASE recv_open BY <2>22 DEF recv_open
+      <2>23. CASE recv_notify_closed BY <2>23 DEF recv_notify_closed
+      <2>24. CASE SpuriousInterrupts BY <2>24 DEF SpuriousInterrupts, spurious
+      <2>25. CASE UNCHANGED vars BY <2>25 DEF vars
+      <2>26. QED
+        BY <2>1, <2>2, <2>3, <2>4, <2>5, <2>6, <2>7, <2>8, <2>9,
+           <2>10, <2>11, <2>12, <2>13, <2>14, <2>15, <2>16, <2>17, <2>18, <2>19,
+           <2>20, <2>21, <2>22, <2>23, <2>24, <2>25
+        DEF Next, ReceiverClose, ReceiverRead, SenderClose, SenderWrite
+<1> QED BY PTL DEF Spec
+
+(* Like ReadLimitEventually, but in terms of ISpec rather than RSpec. *)
+LEMMA ReadLimitISpec ==
+    ASSUME NEW n \in Nat
+    PROVE  ISpec /\ ReadLimit >= n ~> \/ Len(Got) >= n
+                                      \/ ~ReceiverLive
+<1> DEFINE G == ReadLimit >= n ~> Len(Got) >= n \/ ~ReceiverLive
+<1> SUFFICES ASSUME []ISpec PROVE G BY PTL DEF ISpec
+<1> (<>~ReceiverLive) \/ RSpec BY PTL DEF ISpec, RSpec
+<1> RSpec => G BY ReadLimitEventually, PTL DEF RSpec
+<1> (<>~ReceiverLive) => G
+    <2> SUFFICES ASSUME <>~ReceiverLive PROVE G OBVIOUS
+    <2> <>[]~ReceiverLive BY ReceiverLiveFinal, PTL DEF ISpec
+    <2> QED BY PTL
+<1> QED BY PTL
+
+(* When the sender is waiting, the receiver will get everything in the buffer.
+   This eliminates ReadLimit and anything about the state of the receiver thread. *)
+ReadAllCondition_prop(n) ==
+     /\ ISpec
+     /\ SenderLive
+     /\ pc[SenderWriteID] \in {"sender_ready", "sender_blocked"}
+     /\ Len(Got) + Len(Buffer) = n   (* If we've sent n bytes in total... *)
+     ~> \/ Len(Got) >= n             (* then at least n bytes will eventually be received. *)
+        \/ ~ReceiverLive
+LEMMA ReadAllCondition == 
+  ASSUME NEW n \in Nat
+  PROVE ReadAllCondition_prop(n)
+<1> SUFFICES ASSUME []ReceiverLive,
+                    []ISpec
+             PROVE  /\ SenderLive
+                    /\ pc[SenderWriteID] \in {"sender_ready", "sender_blocked"}
+                    /\ Len(Got) + Len(Buffer) = n
+                    ~> Len(Got) >= n
+    BY PTL, ReceiverLiveFinal DEF ISpec, ReadAllCondition_prop
+<1> I BY PTL DEF ISpec, I
+<1> SenderLive /\ ReceiverLive /\ pc[SenderWriteID] \in {"sender_ready", "sender_blocked"}
+    => ReadLimit = Len(Got) + Len(Buffer)
+    <2> SUFFICES ASSUME SenderLive, ReceiverLive, pc[SenderWriteID] \in {"sender_ready", "sender_blocked"}
+                 PROVE  ReadLimit = Len(Got) + Len(Buffer) OBVIOUS
+    <2> IntegrityI /\ NotifyFlagsCorrect /\ CloseOK /\ PCOK /\ TypeOK BY DEF I, IntegrityI
+    <2> CASE Len(Buffer) = 0 BY LengthFacts DEF ReadLimit, PCOK
+    <2> DEFINE PC == pc[ReceiverReadID]
+    <2> CASE PC = "recv_read_data"
+        <3> CASE have > 0 BY DEF ReadLimit
+        <3> CASE have = 0
+            <4> CASE NotifyWrite
+                <5> ReaderInfoAccurate BY DEF I
+                <5> QED BY DEF ReaderInfoAccurate, ReadLimit
+            <4> CASE DataReadyInt BY DEF ReadLimit
+            <4> QED BY DEF NotifyFlagsCorrect
+        <3> QED BY DEF TypeOK
+    <2> CASE /\ ~DataReadyInt
+             /\ \/ PC = "recv_await_data"
+                \/ PC = "recv_init" /\ ReceiverBlocksFirst
+        <3> have = 0 BY DEF IntegrityI
+        <3> NotifyWrite BY DEF NotifyFlagsCorrect
+        <3> ReaderInfoAccurate BY DEF I
+        <3> QED BY DEF ReaderInfoAccurate
+    <2> CASE PC \in {"recv_final_check", "Done"} BY DEF CloseOK
+    <2> QED BY DEF PCOK, ReadLimit, TypeOK
+<1> SUFFICES ASSUME ISpec, I, ReceiverLive, SenderLive,
+                    pc[SenderWriteID] \in {"sender_ready", "sender_blocked"},
+                    Len(Got) + Len(Buffer) = n
+             PROVE  <>(Len(Got) >= n)
+   BY PTL
+<1> Len(Got) + Len(Buffer) = n => ReadLimit >= n OBVIOUS
+<1> QED BY PTL, ReadLimitISpec
+
+(* When the sender is waiting, the receiver will get everything sent. *)
+ReaderLiveness_prop(n) ==
+        /\ ISpec
+        /\ SenderLive
+        /\ \/ pc[SenderWriteID] = "sender_ready"
+           \/ pc[SenderWriteID] = "sender_blocked"
+        /\ Len(Sent) = n + Len(msg)
+        ~> \/ Len(Got) >= n
+           \/ ~ReceiverLive 
+LEMMA ReaderLiveness ==
+  ASSUME NEW n \in Nat
+  PROVE ReaderLiveness_prop(n)
+<1> ReadAllCondition_prop(n) BY ReadAllCondition
+<1> ASSUME IntegrityI,
+           \/ pc[SenderWriteID] = "sender_ready"
+           \/ pc[SenderWriteID] = "sender_blocked",
+           Len(Sent) = n + Len(msg)
+    PROVE /\ pc[SenderWriteID] \in {"sender_ready", "sender_blocked"}
+          /\ Len(Got) + Len(Buffer) = n
+    <2> TypeOK BY DEF IntegrityI
+    <2> Sent = (Got \o Buffer) \o msg BY DEF IntegrityI
+    <2> Len(Sent) = Len(Got) + Len(Buffer) + Len(msg) BY ConcatFacts, LengthFacts
+    <2> n + Len(msg) = Len(Got) + Len(Buffer) + Len(msg) OBVIOUS
+    <2> n = Len(Got) + Len(Buffer) BY LengthFacts
+    <2> pc[SenderWriteID] \in {"sender_ready", "sender_blocked"} OBVIOUS
+    <2> QED OBVIOUS
+<1> QED BY PTL DEF ISpec, I, ReadAllCondition_prop, ReaderLiveness_prop
 
 -----------------------------------------------------------------------------
 
@@ -2355,5 +2962,38 @@ THEOREM WriteLimitMonotonic ==
       <2> UNCHANGED pc[SenderWriteID] BY DEF PCOK
       <2> QED BY UnchangedWriteLimitGe DEF SenderInfoAccurate, WriteLimit
 <1> QED BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6 DEF Next
+
+-----------------------------------------------------------------------------
+
+THEOREM Spec => Availability
+<1> SUFFICES ASSUME []ISpec PROVE Availability BY SpecToISpec, PTL DEF ISpec
+<1> ISpec BY PTL DEF ISpec
+<1> I /\ IntegrityI /\ TypeOK /\ PCOK BY PTL DEF ISpec, I, IntegrityI
+<1> SUFFICES ASSUME NEW x \in Nat
+             PROVE  x = Len(Sent) /\ SenderLive /\ pc[SenderWriteID] = "sender_ready"
+                      ~> \/ Len(Got) >= x
+                         \/ ~ReceiverLive
+    BY DEF Availability, AvailabilityNat
+<1> SUFFICES ASSUME 
+         /\ SenderLive
+         /\ pc[SenderWriteID] = "sender_ready"
+         /\ Len(Sent) = x
+    PROVE <> \/ Len(Got) >= x
+             \/ ~ReceiverLive
+    <2> x = Len(Sent) => Len(Sent) = x OBVIOUS
+    <2> QED BY PTL
+<1> ReaderLiveness_prop(x) BY ReaderLiveness
+<1> /\ SenderLive
+    /\ \/ pc[SenderWriteID] = "sender_ready"
+       \/ pc[SenderWriteID] = "sender_blocked"
+    /\ Len(Sent) = x + Len(msg)
+    ~> \/ Len(Got) >= x
+       \/ ~ReceiverLive 
+   BY PTL DEF ReaderLiveness_prop
+<1> Len(msg) = 0 BY LengthFacts DEF IntegrityI
+<1> SUFFICES ASSUME Len(Sent) = x
+             PROVE  Len(Sent) = x + Len(msg)
+    BY PTL
+<1> QED BY LengthFacts
 
 =============================================================================
