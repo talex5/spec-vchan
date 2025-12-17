@@ -5,7 +5,7 @@
    This is intended as a simple demonstration of proving a liveness
    property (that the receiver eventually reads anything that is sent). *)
 
-EXTENDS Naturals, TLAPS
+EXTENDS Naturals, NaturalsInduction, TLAPS
 
 CONSTANT BufferSize 
 ASSUME BufferSizeType == BufferSize \in Nat \ {0}
@@ -39,11 +39,11 @@ Send ==
     /\ Sent' = Sent + n
     /\ UNCHANGED Got
 
-(* The receiver reads everything currently in the buffer. *)
+(* The receiver reads some or all of the data in the buffer. *)
 Recv ==
-  /\ BufferUsed > 0
-  /\ Got' = Got + BufferUsed
-  /\ UNCHANGED Sent
+  \E n \in 1..BufferUsed :
+    /\ Got' = Got + n
+    /\ UNCHANGED Sent
 
 Next ==
   \/ Send
@@ -78,6 +78,16 @@ THEOREM AlwaysI == Spec => []I
 <1> I /\ [Next]_vars => I' BY NextPreservesI DEF vars, I
 <1> QED BY PTL DEF Spec
 
+(* Like spec, but in terms of the invariant rather than the initial state.
+   Things proved using ISpec are true from any state, not just the initial one. *)
+ISpec ==
+  /\ []I
+  /\ [][Next]_vars
+  /\ WF_vars(Recv)
+
+LEMMA SpecImpliesISpec == Spec => ISpec
+BY AlwaysI DEF Spec, ISpec
+
 -----------------------------------------------------------------------------
 
 (* Proving liveness.
@@ -89,61 +99,94 @@ THEOREM AlwaysI == Spec => []I
    - While in state A, that action is always possible.
    - If the action is always possible then it will eventually happen (fairness).
    
-   In this example, A indicates that some number of bytes have been sent
-   but not received, and B that they have been received. *)
+   In this example, A indicates that we're i+1 bytes away from our goal
+   and B is that we're within i steps. *)
 
-(* If we're already at A, we always either stay there or move to B.
-   (for this proof, we don't need the bits about B, but that might
-   be useful in other cases so I left them in). *)
+(* Dist(n, i) says we are within i bytes of getting the first n bytes. *)
+Dist(n, i) == Sent >= n /\ n - Got <= i
+
+(* If we're already at A, we always either stay there or move to B. *)
 LEMMA NoBacksliding ==
-  ASSUME NEW n \in Nat, I, [Next]_vars,        
-             Sent >= n, ~(Got >= n)
-  PROVE  Sent' >= n \/ Got' >= n
-<1> CASE Send BY DEF Send, I
-<1> CASE Recv BY DEF Recv, I
-<1> QED BY DEF Next, vars
+  ASSUME NEW n \in Nat, NEW i \in Nat,
+         I, [Next]_vars,
+         Dist(n, i + 1)
+  PROVE  Dist(n, i + 1)'
+<1> CASE Send BY DEF Send, I, Dist
+<1> CASE Recv BY DEF Recv, I, Dist
+<1> QED BY DEF Next, vars, Dist
 
 (* Performing a Recv step from A takes us to our goal, B. *)
 LEMMA RecvUseful ==
-  ASSUME NEW n \in Nat, Sent >= n, ~(Got >= n), I, Recv
-  PROVE  Got' >= n
-BY DEF Recv, I
+  ASSUME NEW n \in Nat, NEW i \in Nat,
+         I, Recv,
+         Dist(n, i + 1)
+  PROVE  Dist(n, i)'
+BY DEF Recv, I, Dist
 
-(* If we're at A, Recv is possible.
-   In this simple example the solver can prove this directly,
-   but typically proving ENABLED <<X>>_vars directly is too hard 
-   and it's better to prove ENABLED X and use ENABLEDaxioms,
-   which is what we do here.
-   Warning: ENABLEDaxioms is fussy about the exact syntax (<=>) used. *)
+(* If we're at A, Recv is possible. *)
 LEMMA EnabledRecv ==
-  ASSUME NEW n \in Nat, I,
-         Sent >= n, ~(Got >= n)
+  ASSUME NEW n \in Nat, NEW i \in Nat, I,
+         Dist(n, i + 1), ~Dist(n, i)
   PROVE  ENABLED <<Recv>>_vars
-<1> <<Recv>>_vars <=> Recv BY DEF vars, Recv, I
-<1> ENABLED <<Recv>>_vars <=> ENABLED Recv BY ENABLEDaxioms
-<1> SUFFICES ENABLED Recv OBVIOUS
-<1> BufferUsed > 0 BY DEF I
-<1> QED BY AutoUSE, ExpandENABLED DEF Recv
+<1> SUFFICES ENABLED Recv
+    <2> <<Recv>>_vars <=> Recv BY DEF vars, Recv, I
+    <2> ENABLED <<Recv>>_vars <=> ENABLED Recv BY ENABLEDaxioms
+    <2> QED OBVIOUS
+<1> BufferUsed > 0 BY DEF I, Dist
+<1> QED BY AutoUSE, ExpandENABLED DEF Recv, I
 
-THEOREM
-  ASSUME NEW n \in Nat
-  PROVE  Spec => Liveness
-<1> DEFINE B == Got >= n
-<1> DEFINE A == Sent >= n /\ ~B
+(* If we're within i+1 bytes of our goal, then eventually
+   we'll be within i bytes. *)
+LEMMA Progress ==
+  ASSUME NEW n \in Nat, NEW i \in Nat
+  PROVE  ISpec /\ Dist(n, i+1) ~> Dist(n, i)
+<1> DEFINE B == Dist(n, i)
+<1> DEFINE A == Dist(n, i+1) /\ ~B
 <1> SUFFICES ASSUME []I,
                     [][Next]_vars,
                     WF_vars(Recv)
-             PROVE  Sent = n ~> B
-    <2> Spec => []I BY PTL, AlwaysI DEF Spec
-    <2> QED BY DEF Spec, I, Liveness
-<1> SUFFICES A ~> B
-    <2> Sent = n => Sent >= n OBVIOUS
-    <2> Sent = n ~> Sent >= n BY PTL
-    <2> QED BY PTL
+             PROVE  A ~> B
+    BY PTL DEF ISpec
 <1> I BY PTL
 <1> A /\ Recv => B' BY RecvUseful
-<1> A /\ [Next]_vars => (A \/ B)' BY NoBacksliding
+<1> A /\ [Next]_vars => (A \/ B)' BY NoBacksliding DEF Dist
 <1> A => ENABLED <<Recv>>_vars BY EnabledRecv, PTL
+<1> QED BY PTL
+
+(* By induction, we'll always eventually be 0 bytes from our goal. *)
+EventuallyDone_prop(n, i) == Dist(n, i) ~> Dist(n, 0)
+LEMMA EventuallyDone ==
+  ASSUME NEW n \in Nat
+  PROVE  ISpec => \A i \in Nat : EventuallyDone_prop(n, i)
+<1> SUFFICES ASSUME []ISpec
+             PROVE \A i \in Nat : Dist(n, i) ~> Dist(n, 0)
+    BY PTL DEF ISpec, EventuallyDone_prop
+<1> ISpec /\ I BY PTL DEF ISpec
+<1> DEFINE R(i) == Dist(n, i) ~> Dist(n, 0)
+<1>1 R(0) BY PTL
+<1>2 ASSUME NEW i \in Nat, R(i) PROVE R(i + 1)
+    <2> Dist(n, i+1) ~> Dist(n, i) BY PTL, Progress
+    <2> Dist(n, i) ~> Dist(n, 0) BY <1>2
+    <2> QED BY PTL
+<1> \A i \in Nat : R(i)
+    <2> HIDE DEF R
+    <2> QED BY NatInduction, Isa, <1>1, <1>2
+<1> SUFFICES ASSUME NEW i \in Nat PROVE R(i)
+    OBVIOUS
+<1> HIDE DEF R
+<1> QED OBVIOUS
+
+THEOREM Spec => Liveness
+<1> SUFFICES ASSUME []ISpec PROVE Liveness
+    BY PTL, SpecImpliesISpec DEF ISpec
+<1> ISpec /\ I BY PTL DEF ISpec
+<1> SUFFICES ASSUME NEW n \in Nat PROVE Sent = n ~> Got >= n
+    BY DEF Liveness, LivenessNat, I
+<1> Sent = n => Dist(n, BufferSize) BY BufferSizeType DEF Dist, I
+<1> Dist(n, BufferSize) ~> Dist(n, 0)
+    <2> EventuallyDone_prop(n, BufferSize) BY BufferSizeType, EventuallyDone
+    <2> QED BY DEF EventuallyDone_prop
+<1> Dist(n, 0) => Got >= n BY DEF Dist, I
 <1> QED BY PTL
 
 =============================================================================
