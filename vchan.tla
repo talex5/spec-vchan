@@ -2506,9 +2506,27 @@ WriteLimit ==
       [] PC \in {"sender_check_notify_data", "sender_notify_data", "sender_blocked"} ->
                 BytesTransmitted         \* Will block
 
+(* All SenderWrite steps are fair except for sender_ready;
+   the sender doesn't have to keep sending things, but if it
+   starts to send something it must continue. *)
+SenderFair == pc[SenderWriteID] # "sender_ready" /\ SenderWrite
+
+(* A modified version of ISpec for proving WriteLimit facts.
+   It only requires fairness of the sender, requires the
+   receiver to stay live (otherwise we can't prove much),
+   and requires that the client doesn't give up while trying
+   to send something. *)
+WSpec ==
+  /\ [][Next]_vars
+  /\ []I
+  /\ WF_vars(SenderFair)
+  /\ []ReceiverLive
+  /\ []CleanShutdownOnly
+
 (* If WriteLimit says we will send some amount of data then we will eventually send
    at least that much data (or close the connection).
-   This should be checked without weak fairness (so just I /\ [][Next]_vars). *)
+   This should be checked without weak fairness (so just I /\ [][Next]_vars).
+   TODO: Would make more sense to check WF_vars(SenderFair). *)
 WriteLimitCorrect ==
   /\ WF_vars(SenderWrite) =>
       \A i \in AvailabilityNat :
@@ -2520,6 +2538,28 @@ WriteLimitCorrect ==
   /\ [][SenderWrite => \/ UNCHANGED WriteLimit
                        \/ pc[SenderWriteID] \in {"sender_ready"}
                        \/ pc'[SenderWriteID] \in {"Done"}]_vars
+
+(* If we're not trying to send anything at the moment then WriteLimit
+   predicts we won't send anything further. This is the case for
+   sender_ready, and also Done if CleanShutdownOnly. *)
+LEMMA WriteLimitNoMsg ==
+  ASSUME NEW n \in Nat, NEW i \in Nat,
+         IntegrityI, Len(msg) = 0
+  PROVE  WriteLimit = BytesTransmitted
+<1> TypeOK /\ PCOK BY DEF IntegrityI
+<1> CASE SenderInfoAccurate
+    <2> WriteLimit = Len(Got) + Min(BufferSize, Len(Buffer) + Len(msg))
+        BY DEF WriteLimit, SenderInfoAccurate
+    <2> QED BY LengthFacts DEF Min
+<1> CASE ~SenderInfoAccurate
+    <2> pc[SenderWriteID] \in {"sender_write_data", "sender_check_notify_data",
+                               "sender_notify_data", "sender_blocked"}
+        BY DEF SenderInfoAccurate, PCOK
+    <2> ASSUME pc[SenderWriteID] \in {"sender_write_data", "sender_blocked"} PROVE FALSE
+        <3> msg # <<>> BY DEF IntegrityI
+        <3> QED BY LengthFacts
+    <2> QED BY DEF WriteLimit
+<1> QED OBVIOUS
 
 (* Whenever the receiver is blocked, the sender will fill the buffer (or write everything
    it wants to write) without further action from any other process. *)
@@ -2574,10 +2614,7 @@ THEOREM SenderWritePreservesWriteLimit ==
 <1> TypeOK' /\ IntegrityI' BY NextPreservesI, I' DEF I, IntegrityI, Next
 <1> USE LengthFacts
 <1> UNCHANGED << pc[SenderCloseID], pc[ReceiverReadID], pc[ReceiverCloseID] >>
-    BY DEF SenderWrite, sender_ready, sender_write, sender_request_notify,
-              sender_recheck_len, sender_write_data,
-              sender_check_notify_data, sender_notify_data,
-              sender_blocked, sender_check_recv_live, PCOK
+    BY UnchangedPC DEF Next
 <1>1. CASE sender_ready BY <1>1
 <1>2. CASE \/ sender_write \/ sender_request_notify
            \/ sender_check_notify_data \/ sender_notify_data
@@ -2992,6 +3029,613 @@ THEOREM WriteLimitMonotonic ==
       <2> UNCHANGED pc[SenderWriteID] BY DEF PCOK
       <2> QED BY UnchangedWriteLimitGe DEF SenderInfoAccurate, WriteLimit
 <1> QED BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6 DEF Next
+
+(* Says when the SenderFair action is enabled
+   (we block at sender_blocked if no interrupt has been sent). *)
+LEMMA Enabled_SenderFair ==
+  ASSUME I,
+         pc[SenderWriteID] \notin {"sender_ready", "Done"},
+         pc[SenderWriteID] = "sender_blocked" => SpaceAvailableInt \/ ~SenderLive
+  PROVE  ENABLED <<SenderFair>>_vars
+<1> DEFINE PC == pc[SenderWriteID]
+<1> TypeOK /\ PCOK BY DEF I, IntegrityI
+<1> SUFFICES ENABLED SenderFair
+    <2> <<SenderFair>>_vars <=> SenderFair
+        <3> SUFFICES ASSUME SenderFair PROVE vars # vars' OBVIOUS
+        <3> PC # PC'
+            BY DEF SenderFair, SenderWrite, sender_ready, sender_write, sender_request_notify,
+                   sender_recheck_len, sender_write_data,
+                   sender_check_notify_data, sender_notify_data,
+                   sender_blocked, sender_check_recv_live, PCOK
+        <3> QED BY DEF vars
+    <2> (ENABLED <<SenderFair>>_vars) <=> (ENABLED SenderFair) BY ENABLEDaxioms
+    <2> QED OBVIOUS
+<1> QED BY AutoUSE, ExpandENABLED DEF PCOK
+
+(* Possible next values for PC in the SenderWrite process. *)
+NextPC_send(s) ==
+  IF s = "sender_ready" THEN {"sender_write", "Done"}
+  ELSE IF s = "sender_write" THEN {"sender_request_notify"}
+  ELSE IF s = "sender_request_notify" THEN {"sender_write_data", "sender_recheck_len"}
+  ELSE IF s = "sender_recheck_len" THEN {"sender_write_data"}
+  ELSE IF s = "sender_write_data" THEN {"sender_check_notify_data", "sender_blocked"}
+  ELSE IF s = "sender_check_notify_data" THEN {"sender_notify_data", "sender_ready", "sender_blocked"}
+  ELSE IF s = "sender_notify_data" THEN {"sender_ready", "sender_blocked"}
+  ELSE IF s = "sender_blocked" THEN {"Done", "sender_check_recv_live"}
+  ELSE {"sender_write", "Done"}
+  
+LEMMA NextPC_send_correct ==
+  ASSUME I, SenderWrite,
+         NEW s \in {"sender_ready", "sender_write", "sender_request_notify", "sender_recheck_len",
+         "sender_write_data", "sender_blocked", "sender_check_notify_data", "sender_notify_data",
+         "sender_check_recv_live", "Done"}
+  PROVE pc[SenderWriteID] = s => pc'[SenderWriteID] \in NextPC_send(s)
+<1> DEFINE PC == pc[SenderWriteID]
+<1> TypeOK /\ PCOK BY DEF I, IntegrityI
+<1> USE DEF NextPC_send, PCOK
+<1>1 CASE sender_ready BY <1>1 DEF sender_ready
+<1>2 CASE sender_write BY <1>2 DEF sender_write
+<1>3 CASE sender_request_notify BY <1>3 DEF sender_request_notify
+<1>4 CASE sender_recheck_len BY <1>4 DEF sender_recheck_len
+<1>5 CASE sender_write_data BY <1>5 DEF sender_write_data
+<1>6 CASE sender_check_notify_data BY <1>6 DEF sender_check_notify_data
+<1>7 CASE sender_notify_data BY <1>7 DEF sender_notify_data
+<1>8 CASE sender_blocked BY <1>8 DEF sender_blocked
+<1>9 CASE sender_check_recv_live BY <1>9 DEF sender_check_recv_live
+<1>10 QED BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, <1>7, <1>8, <1>9 DEF SenderWrite
+
+(* For each PC value, there is only one possible step we can take. *)
+SendStep(s) ==
+  IF s = "sender_ready" THEN sender_ready
+  ELSE IF s = "sender_write" THEN sender_write
+  ELSE IF s = "sender_request_notify" THEN sender_request_notify
+  ELSE IF s = "sender_recheck_len" THEN sender_recheck_len
+  ELSE IF s = "sender_write_data" THEN sender_write_data
+  ELSE IF s = "sender_blocked" THEN sender_blocked
+  ELSE IF s = "sender_check_notify_data" THEN sender_check_notify_data
+  ELSE IF s = "sender_notify_data" THEN sender_notify_data
+  ELSE sender_check_recv_live
+
+LEMMA SendStep_correct ==
+  ASSUME I, SenderWrite,
+         NEW s \in {"sender_ready", "sender_write", "sender_request_notify", "sender_recheck_len",
+         "sender_write_data", "sender_blocked", "sender_check_notify_data", "sender_notify_data",
+         "sender_check_recv_live"}
+  PROVE pc[SenderWriteID] = s => SendStep(s)
+<1> PCOK BY DEF I, IntegrityI
+<1> QED BY DEF SenderWrite, sender_ready, sender_write, sender_request_notify, sender_recheck_len, sender_write_data,
+               sender_check_notify_data, sender_notify_data, sender_blocked, sender_check_recv_live,
+               SendStep
+
+(* Only SenderWrite steps change the SenderWrite PC or its private variables. *)
+LEMMA SenderWritePrivate ==
+  PCOK /\ [Next]_vars => [SenderWrite]_<<pc[SenderWriteID], free, Sent, msg>>
+BY UnchangedPC, UnchangedFacts DEF SenderWrite
+
+(* Most SenderWrite steps proceed easily to the next ones.
+   sender_ready doesn't because it's not fair, Done is final, and
+   sender_blocked is complicated. *)
+Progress_send_steps_prop(s) ==
+  WSpec =>
+     pc[SenderWriteID] = s ~> pc[SenderWriteID] \in NextPC_send(s)
+LEMMA Progress_send_steps ==
+  ASSUME NEW s \in STRING, s \notin {"sender_ready", "sender_blocked", "Done"}
+  PROVE  Progress_send_steps_prop(s)
+<1> DEFINE S == pc[SenderWriteID] = s
+<1> DEFINE G == pc[SenderWriteID] \in NextPC_send(s)
+<1> SUFFICES ASSUME []WSpec PROVE S ~> G BY PTL DEF WSpec, Progress_send_steps_prop
+<1> I /\ IntegrityI /\ PCOK /\ TypeOK BY PTL DEF WSpec, I, IntegrityI
+<1>1 S /\ SenderFair => G' BY NextPC_send_correct DEF NextPC_send, PCOK, SenderFair
+<1>2 S /\ [Next]_vars => (S \/ G)'
+    <2> CASE SenderFair BY <1>1
+    <2> CASE UNCHANGED <<pc[SenderWriteID]>> OBVIOUS
+    <2> QED BY SenderWritePrivate DEF SenderFair
+<1>3 S => ENABLED(<<SenderFair>>_vars) BY Enabled_SenderFair
+<1> WF_vars(SenderFair) BY PTL DEF SenderFair, WSpec
+<1> QED BY <1>1, <1>2, <1>3, PTL DEF WSpec
+
+AlwaysWriteLimit_prop(n) == WSpec /\ WriteLimit >= n => [](WriteLimit >= n)
+LEMMA AlwaysWriteLimit ==
+  ASSUME NEW n \in Nat
+         PROVE AlwaysWriteLimit_prop(n)
+<1> SUFFICES ASSUME []WSpec, []CleanShutdownOnly, []ReceiverLive
+             PROVE WriteLimit >= n => [](WriteLimit >= n) BY PTL DEF WSpec, AlwaysWriteLimit_prop
+<1> [Next]_vars /\ WriteLimit >= n => (WriteLimit >= n)'
+    <2> I /\ CleanShutdownOnly BY PTL DEF WSpec, I, IntegrityI
+    <2> WriteLimit \in Nat BY PTL, WriteLimitType
+    <2> (WriteLimit \in Nat)' BY PTL, WriteLimitType
+    <2> [Next]_vars => WriteLimit' >= WriteLimit BY WriteLimitMonotonic
+    <2> QED OBVIOUS
+<1> QED BY PTL DEF WSpec
+
+LEMMA BytesTransmittedMonotonic ==
+  ASSUME []IntegrityI, [][Next]_vars
+  PROVE  BytesTransmitted' >= BytesTransmitted
+<1> [Next]_vars /\ IntegrityI /\ TypeOK /\ PCOK BY PTL DEF IntegrityI
+<1> BytesTransmitted = Len(Sent) - Len(msg) BY BytesTransmittedEq
+<1> BytesTransmitted' >= BytesTransmitted
+    <2> USE LengthFacts
+    <2> CASE SenderWrite
+        <3> CASE sender_write_data
+            <4> CASE free > 0 BY TakeDropFacts DEF Min, sender_write_data
+            <4> QED BY DEF sender_write_data
+        <3> ASSUME ~sender_write_data PROVE UNCHANGED BytesTransmitted
+            BY UnchangedFacts, UnchangedPC DEF SenderWrite, ReceiverRead
+        <3> QED OBVIOUS
+    <2> CASE ~SenderWrite
+        <3> SUFFICES UNCHANGED BytesTransmitted OBVIOUS
+        <3> (BytesTransmitted = Len(Sent) - Len(msg))' BY PTL
+        <3> SUFFICES UNCHANGED <<Sent, msg>> OBVIOUS
+        <3> QED BY SenderWritePrivate
+    <2> QED BY DEF Next, vars
+<1> QED OBVIOUS
+    
+(* We are within i bytes of having written n bytes to the buffer. *)
+WDist(n, i) == WriteLimit >= n /\ BytesTransmitted + i >= n
+
+(* WriteLimit and BytesTransmitted are both monotonic, so WDist is too. *)
+AlwaysWDist_prop(n, i) == WSpec /\ WDist(n, i+1) => []WDist(n, i+1)
+LEMMA AlwaysWDist ==
+  ASSUME NEW n \in Nat, NEW i \in Nat
+  PROVE  AlwaysWDist_prop(n, i)
+<1> SUFFICES ASSUME []WSpec, []CleanShutdownOnly, []ReceiverLive
+             PROVE  WDist(n, i+1) => []WDist(n, i+1)
+    BY PTL DEF WSpec, AlwaysWDist_prop
+<1> I /\ IntegrityI /\ [Next]_vars /\ TypeOK /\ PCOK BY PTL DEF WSpec, I, IntegrityI
+<1> BytesTransmitted \in Nat BY LengthFacts
+<1> [Next]_vars /\ WDist(n, i+1) => WDist(n, i + 1)'
+    <2> SUFFICES ASSUME [Next]_vars, CleanShutdownOnly, ReceiverLive,
+                        WriteLimit >= n /\ BytesTransmitted + (i+1) >= n
+                 PROVE  (WriteLimit >= n /\ BytesTransmitted + (i+1) >= n)' BY PTL DEF WDist, vars
+    <2> SUFFICES (BytesTransmitted + (i+1) >= n)'
+        <3> AlwaysWriteLimit_prop(n) BY AlwaysWriteLimit
+        <3> QED BY PTL DEF AlwaysWriteLimit_prop
+    <2> SUFFICES BytesTransmitted' >= BytesTransmitted
+        <3> (BytesTransmitted \in Nat)' BY PTL
+        <3> QED BY LengthFacts
+    <2> QED BY PTL, BytesTransmittedMonotonic
+<1> QED BY PTL DEF WSpec
+
+(* WDist(n, i) is trivially true if there's nothing left to transmit. *)
+LEMMA WDistNoMsg ==
+  ASSUME NEW n \in Nat, NEW i \in Nat,
+         IntegrityI, Len(msg) = 0,
+         WriteLimit >= n
+  PROVE  WDist(n, i)
+<1> TypeOK /\ PCOK BY DEF IntegrityI
+<1> SUFFICES WriteLimit = BytesTransmitted BY LengthFacts DEF WDist
+<1> QED BY WriteLimitNoMsg
+
+(* The key sender_write_data steps makes progress on WDist. *)
+SenderWriteDataProgress_prop(n, i) ==
+  pc[SenderWriteID] = "sender_write_data" /\ free > 0 /\ WDist(n, i + 1) ~> WDist(n, i)
+LEMMA SenderWriteDataProgress ==
+  ASSUME NEW n \in Nat, NEW i \in Nat
+  PROVE WSpec => SenderWriteDataProgress_prop(n, i)
+<1> DEFINE A == pc[SenderWriteID] = "sender_write_data" /\ free > 0 /\ WDist(n, i + 1)
+<1> DEFINE B == WDist(n, i)
+<1> SUFFICES ASSUME []WSpec, []CleanShutdownOnly, []ReceiverLive PROVE A ~> B
+    BY PTL DEF WSpec, SenderWriteDataProgress_prop
+<1> I /\ IntegrityI /\ PCOK /\ TypeOK /\ [Next]_vars BY PTL DEF WSpec, I, IntegrityI
+<1> BytesTransmitted \in Nat BY LengthFacts DEF TypeOK
+<1> Len(Got) \in Nat /\ Len(Buffer) \in Nat BY LengthFacts
+<1> A /\ SenderFair => B'
+    <2> SUFFICES ASSUME A, SenderFair PROVE B' OBVIOUS
+    <2> sender_write_data BY SendStep_correct DEF SendStep, PCOK, SenderFair
+    <2> WriteLimit >= n /\ BytesTransmitted + (i+1) >= n BY DEF WDist
+    <2> (WriteLimit >= n)'
+        <3> AlwaysWriteLimit_prop(n) BY AlwaysWriteLimit
+        <3> QED BY PTL DEF AlwaysWriteLimit_prop
+    <2> SUFFICES BytesTransmitted' + i >= n BY DEF WDist
+    <2> (BytesTransmitted \in Nat)' BY PTL
+    <2> SUFFICES BytesTransmitted' > BytesTransmitted BY LengthFacts
+    <2> Len(Buffer') > Len(Buffer)
+        <3> Buffer' = Buffer \o Take(msg, Min(Len(msg), free)) BY DEF sender_write_data
+        <3> Min(Len(msg), free) > 0 BY LengthFacts DEF Min, IntegrityI
+        <3> QED BY TakeDropFacts, LengthFacts DEF Min
+    <2> UNCHANGED Len(Got) BY DEF sender_write_data
+    <2> (Len(Got) \in Nat)' /\ (Len(Buffer) \in Nat)' BY PTL
+    <2> QED BY LengthFacts
+<1> A /\ [Next]_vars => (A \/ B)'
+    <2> SUFFICES ASSUME A, [Next]_vars PROVE (A \/ B)' OBVIOUS
+    <2> [SenderWrite]_<<pc[SenderWriteID], free, Sent, msg>> BY SenderWritePrivate
+    <2> ASSUME SenderWrite PROVE B' BY DEF SenderFair
+    <2> ASSUME ~SenderWrite PROVE A'
+        <3> AlwaysWDist_prop(n, i) BY AlwaysWDist
+        <3> WDist(n, i + 1)' BY PTL DEF AlwaysWDist_prop
+        <3> QED OBVIOUS
+    <2> QED OBVIOUS
+<1> A => ENABLED <<SenderFair>>_vars BY Enabled_SenderFair
+<1> WF_vars(SenderFair) BY PTL DEF WSpec, SenderFair
+<1> QED BY PTL
+
+(* The sender_blocked case is special because we need SpaceAvailableInt. *)
+LEMMA InterruptWakesSender ==
+  ASSUME []WSpec
+  PROVE pc[SenderWriteID] = "sender_blocked" /\ SpaceAvailableInt ~>
+          \/ pc[SenderWriteID] = "sender_check_recv_live"
+          \/ pc[SenderWriteID] = "Done"
+<1> DEFINE A == pc[SenderWriteID] = "sender_blocked" /\ SpaceAvailableInt
+<1> DEFINE B == \/ pc[SenderWriteID] = "sender_check_recv_live"
+                \/ pc[SenderWriteID] = "Done"
+<1> SUFFICES A ~> B BY PTL
+<1> I /\ IntegrityI /\ CloseOK /\ PCOK /\ TypeOK /\ CleanShutdownOnly /\ ReceiverLive /\ [Next]_vars
+    BY PTL DEF WSpec, I, IntegrityI
+<1> A /\ SenderFair => B'
+    <2> SUFFICES ASSUME A, SenderFair PROVE B' OBVIOUS
+    <2> sender_blocked BY SendStep_correct DEF SendStep, SenderFair
+    <2> QED BY DEF sender_blocked, PCOK
+<1> A => ENABLED(<<SenderFair>>_vars) BY Enabled_SenderFair
+<1> A /\ [Next]_vars => (A \/ B)'
+    <2> SUFFICES ASSUME A, [Next]_vars PROVE (A \/ B)' OBVIOUS
+    <2> [SenderWrite]_<<pc[SenderWriteID], free, Sent, msg>> BY SenderWritePrivate
+    <2> CASE SenderFair OBVIOUS
+    <2> CASE ~SenderWrite
+        <3> UNCHANGED pc[SenderWriteID] OBVIOUS
+        <3> UNCHANGED SpaceAvailableInt
+            <4> [sender_blocked \/ recv_notify_read \/ recv_notify_closed \/ spurious]_SpaceAvailableInt
+                BY UnchangedFacts
+            <4> QED BY DEF sender_blocked, recv_notify_read, recv_notify_closed, spurious,
+                           SenderFair, SenderWrite
+        <3> QED OBVIOUS
+    <2> QED BY DEF SenderFair, Next, vars
+<1> QED BY PTL DEF WSpec, SenderFair
+
+(* If we're at sender_blocked, either an interrupt is coming and we'll move on,
+   or we're already at the WriteLimit (by definition). *)
+LEMMA SenderBlockedProgress ==
+  ASSUME NEW n \in Nat, NEW i \in Nat,
+         []WSpec, []WDist(n, i+1)
+  PROVE  pc[SenderWriteID] = "sender_blocked" ~>
+           \/ pc[SenderWriteID] = "sender_check_recv_live"
+           \/ pc[SenderWriteID] = "Done"
+           \/ WDist(n, i)
+<1> I /\ IntegrityI /\ TypeOK
+    BY PTL DEF WSpec, I, IntegrityI
+<1> WriteLimit >= n BY PTL DEF WDist
+<1> USE LengthFacts
+<1> pc[SenderWriteID] = "sender_blocked" /\ ~SpaceAvailableInt => WDist(n, i)
+    <2> SUFFICES ASSUME pc[SenderWriteID] = "sender_blocked", ~SpaceAvailableInt
+                 PROVE  WriteLimit = BytesTransmitted BY DEF WDist
+    <2> CASE SenderInfoAccurate
+        <3> Len(Buffer) + free = BufferSize BY DEF WriteLimit, SenderInfoAccurate
+        <3> WriteLimit = Len(Got) + Min(BufferSize, Len(Buffer) + Len(msg)) BY DEF WriteLimit
+        <3> Len(Buffer) = BufferSize
+            <4> free = 0 BY DEF IntegrityI
+            <4> QED BY DEF IntegrityI
+        <3> QED BY BufferSizeType DEF Min
+    <2> CASE ~SenderInfoAccurate BY DEF WriteLimit
+    <2> QED OBVIOUS
+<1> QED BY PTL, InterruptWakesSender
+
+(* The special thing here is that we ensure free > 0 when moving to sender_write_data *)
+LEMMA SenderRequestNotifyProgress ==
+  ASSUME []WSpec
+  PROVE  pc[SenderWriteID] = "sender_request_notify" ~>
+            \/ pc[SenderWriteID] = "sender_write_data" /\ free > 0
+            \/ pc[SenderWriteID] = "sender_recheck_len"
+<1> I /\ IntegrityI /\ CloseOK /\ PCOK /\ TypeOK /\ CleanShutdownOnly /\ ReceiverLive
+    BY PTL DEF WSpec, I, IntegrityI
+<1> DEFINE A == pc[SenderWriteID] = "sender_request_notify"
+<1> DEFINE B == \/ pc[SenderWriteID] = "sender_write_data" /\ free > 0
+                \/ pc[SenderWriteID] = "sender_recheck_len"
+<1> A /\ SenderFair => B'
+    <2> SUFFICES ASSUME A, SenderFair
+                 PROVE  B'
+        OBVIOUS
+    <2> sender_request_notify BY SendStep_correct DEF SendStep, SenderFair
+    <2> Len(msg) > 0 BY LengthFacts DEF IntegrityI
+    <2> QED BY LengthFacts DEF sender_request_notify, PCOK
+<1> A => ENABLED(<<SenderFair>>_vars) BY Enabled_SenderFair
+<1> A /\ [Next]_vars => (A \/ B)'
+    <2> CASE SenderFair OBVIOUS
+    <2> CASE ~SenderFair
+        BY SenderWritePrivate DEF SenderFair
+    <2> QED OBVIOUS
+<1> QED BY PTL DEF WSpec, SenderFair
+
+(* When we recheck the length, either we find some free space,
+   or there isn't any and we're already at WriteLimit. *)
+SenderRecheckLenProgress_prop(n, i) ==
+  /\ pc[SenderWriteID] = "sender_recheck_len"
+  /\ WDist(n, i+1)
+  ~> /\ pc[SenderWriteID] = "sender_write_data"
+     /\ \/ free > 0
+        \/ WDist(n, i)
+LEMMA SenderRecheckLenProgress ==
+  ASSUME NEW n \in Nat, NEW i \in Nat,
+         []WSpec
+  PROVE  SenderRecheckLenProgress_prop(n, i)
+<1> I /\ IntegrityI /\ CloseOK /\ PCOK /\ TypeOK /\ CleanShutdownOnly /\ ReceiverLive
+    BY PTL DEF WSpec, I, IntegrityI
+<1> BytesTransmitted \in Nat BY LengthFacts
+<1> DEFINE A == /\ pc[SenderWriteID] = "sender_recheck_len"
+                /\ WDist(n, i+1)
+<1> DEFINE B == /\ pc[SenderWriteID] = "sender_write_data"
+                /\ \/ free > 0
+                   \/ WDist(n, i)
+<1> SUFFICES A ~> B BY DEF SenderRecheckLenProgress_prop
+<1> WriteLimit >= n => [](WriteLimit >= n)
+    <2> WSpec BY PTL
+    <2> AlwaysWriteLimit_prop(n) BY AlwaysWriteLimit
+    <2> QED BY DEF AlwaysWriteLimit_prop
+<1> A /\ SenderFair => B'
+    <2> SUFFICES ASSUME A, SenderFair
+                 PROVE  B'
+        OBVIOUS
+    <2> sender_recheck_len BY SendStep_correct DEF SendStep, SenderFair
+    <2> pc[SenderWriteID]' = "sender_write_data" BY DEF sender_recheck_len, PCOK
+    <2> free' = BufferSize - Len(Buffer) BY DEF sender_recheck_len
+    <2> CASE free' > 0 OBVIOUS
+    <2> ASSUME free' = 0 PROVE WDist(n, i)'
+        (* At the instant we checked, the buffer was full,
+           so we're already at WDist(n, 0) *)
+        <3> Len(Buffer) = BufferSize BY LengthFacts
+        <3> WriteLimit = BytesTransmitted
+            <4> SenderInfoAccurate BY DEF SenderInfoAccurate
+            <4> WriteLimit = Len(Got) + Min(BufferSize, Len(Buffer) + Len(msg))
+                BY DEF WriteLimit
+            <4> QED BY LengthFacts DEF Min
+        <3> UNCHANGED BytesTransmitted BY DEF sender_recheck_len
+        <3> SUFFICES (WriteLimit >= n /\ BytesTransmitted + i >= n)' BY DEF WDist
+        <3> WriteLimit >= n BY DEF WDist
+        <3> (WriteLimit >= n)' BY PTL DEF WDist
+        <3> WriteLimit >= n => (BytesTransmitted + i >= n)' OBVIOUS
+        <3> QED BY PTL
+    <2> QED BY LengthFacts DEF TypeOK
+<1> A => ENABLED(<<SenderFair>>_vars) BY Enabled_SenderFair
+<1> A /\ [Next]_vars => (A \/ B)'
+    <2> WDist(n, i+1) => WDist(n, i+1)' BY PTL, AlwaysWDist DEF AlwaysWDist_prop
+    <2> CASE SenderFair OBVIOUS
+    <2> CASE ~SenderFair
+        BY SenderWritePrivate DEF SenderFair
+    <2> QED OBVIOUS
+<1> QED BY PTL DEF WSpec, SenderFair
+
+(* If we're not at our goal then we'll eventually get closer.
+   This is mostly long because PTL doesn't understand sets. *)
+WriterProgress_prop(n, i) ==
+  WSpec => WDist(n, i+1) ~> WDist(n, i)
+LEMMA WriterProgress ==
+  ASSUME NEW n \in Nat, NEW i \in Nat
+  PROVE WriterProgress_prop(n, i)
+<1> SUFFICES ASSUME []WSpec, []CleanShutdownOnly, []ReceiverLive
+             PROVE  WDist(n, i+1) ~> WDist(n, i)
+    BY PTL DEF WSpec, WriterProgress_prop
+<1> SUFFICES ASSUME []WDist(n, i+1)
+             PROVE  <>WDist(n, i)
+    <2> AlwaysWDist_prop(n, i) BY AlwaysWDist
+    <2> QED BY PTL DEF AlwaysWDist_prop
+<1> DEFINE PC == pc[SenderWriteID]
+<1> I /\ IntegrityI /\ CloseOK /\ PCOK /\ TypeOK /\ CleanShutdownOnly /\ ReceiverLive
+    BY PTL DEF WSpec, I, IntegrityI
+<1>0 PC = "sender_ready" /\ WDist(n, i+1) => WDist(n, i)
+    <2> SUFFICES ASSUME PC = "sender_ready",
+                        WriteLimit >= n
+                 PROVE  WDist(n, i) BY DEF WDist
+    <2> Len(msg) = 0 BY LengthFacts DEF IntegrityI
+    <2> QED BY WDistNoMsg
+<1>1 PC = "sender_write" ~> PC = "sender_request_notify"
+    <2> Progress_send_steps_prop("sender_write") BY Progress_send_steps
+    <2> PC \in NextPC_send("sender_write") => PC = "sender_request_notify" BY DEF NextPC_send
+    <2> QED BY PTL DEF Progress_send_steps_prop
+<1>2 PC = "sender_request_notify" ~>
+        \/ PC = "sender_write_data" /\ free > 0
+        \/ PC = "sender_recheck_len"
+    BY SenderRequestNotifyProgress
+<1>3 /\ PC = "sender_recheck_len"
+     /\ WDist(n, i+1)
+     ~> /\ PC = "sender_write_data"
+        /\ \/ free > 0
+           \/ WDist(n, i)
+    <2> SenderRecheckLenProgress_prop(n, i) BY SenderRecheckLenProgress
+    <2> QED BY PTL DEF SenderRecheckLenProgress_prop
+<1>4a PC = "sender_write_data" /\ free > 0 ~> WDist(n, i)
+    <2> SenderWriteDataProgress_prop(n, i) BY SenderWriteDataProgress, PTL
+    <2> QED BY PTL DEF SenderWriteDataProgress_prop
+<1>4b PC = "sender_write_data" ~> PC = "sender_check_notify_data" \/ PC = "sender_blocked"
+    <2> Progress_send_steps_prop("sender_write_data") BY Progress_send_steps
+    <2> PC \in NextPC_send("sender_write_data") =>
+        PC = "sender_check_notify_data" \/ PC = "sender_blocked" BY DEF NextPC_send
+    <2> QED BY PTL DEF Progress_send_steps_prop
+<1>5 PC = "sender_check_notify_data" ~> PC = "sender_notify_data" \/ PC = "sender_ready" \/ PC = "sender_blocked"
+    <2> Progress_send_steps_prop("sender_check_notify_data") BY Progress_send_steps
+    <2> PC \in NextPC_send("sender_check_notify_data") =>
+        PC = "sender_notify_data" \/ PC = "sender_ready" \/ PC = "sender_blocked" BY DEF NextPC_send
+    <2> QED BY PTL DEF Progress_send_steps_prop
+<1>6 PC = "sender_notify_data" ~> PC = "sender_ready" \/ PC = "sender_blocked"
+    <2> Progress_send_steps_prop("sender_notify_data") BY Progress_send_steps
+    <2> PC \in NextPC_send("sender_notify_data") =>
+        PC = "sender_ready" \/ PC = "sender_blocked" BY DEF NextPC_send
+    <2> QED BY PTL DEF Progress_send_steps_prop
+<1>7 PC = "sender_check_recv_live" ~> PC = "sender_write" \/ PC = "Done"
+    <2> Progress_send_steps_prop("sender_check_recv_live") BY Progress_send_steps
+    <2> PC \in NextPC_send("sender_check_recv_live") =>
+        PC = "sender_write" \/ PC = "Done" BY DEF NextPC_send
+    <2> QED BY PTL DEF Progress_send_steps_prop
+<1>8 PC = "sender_blocked" ~>
+       \/ PC = "sender_check_recv_live"
+       \/ PC = "Done"
+       \/ WDist(n, i)
+    BY SenderBlockedProgress, PTL
+<1>9 PC = "Done" /\ WDist(n, i+1) => WDist(n, i)
+    <2> SUFFICES ASSUME PC = "Done", WriteLimit >= n
+                 PROVE  WDist(n, i)
+        BY DEF WDist
+    <2> ~SenderLive BY DEF CloseOK
+    <2> Len(msg) = 0 BY DEF CleanShutdownOnly
+    <2> QED BY WDistNoMsg
+<1> PCOK BY PTL DEF WSpec, I, IntegrityI
+<1> \/ PC = "sender_ready"
+    \/ PC = "sender_write"
+    \/ PC = "sender_request_notify"
+    \/ PC = "sender_recheck_len"
+    \/ PC = "sender_write_data"
+    \/ PC = "sender_check_notify_data"
+    \/ PC = "sender_notify_data"
+    \/ PC = "sender_blocked"
+    \/ PC = "sender_check_recv_live"
+    \/ PC = "Done"
+    BY DEF PCOK
+<1> QED BY PTL, <1>0, <1>1, <1>2, <1>3, <1>4a, <1>4b, <1>5, <1>6, <1>7, <1>8, <1>9 DEF PCOK
+
+(* WriteLimit can't predict we'll transmit more data than the application sent. *)
+LEMMA WriteLimitLimit ==
+  ASSUME I
+  PROVE  WriteLimit <= Len(Sent)
+<1> IntegrityI /\ TypeOK /\ PCOK BY DEF I, IntegrityI
+<1> USE LengthFacts DEF WriteLimit
+<1> BytesTransmitted <= Len(Sent)
+    <2> BytesTransmitted = Len(Sent) - Len(msg) BY BytesTransmittedEq
+    <2> QED OBVIOUS
+<1> CASE SenderInfoAccurate
+    <2> SUFFICES Len(Got) + Min(BufferSize, Len(Buffer) + Len(msg)) <= Len(Sent)
+        OBVIOUS
+    <2> SUFFICES BytesTransmitted + Len(msg) <= Len(Sent) BY DEF Min
+    <2> QED BY BytesTransmittedEq
+<1> CASE ~SenderInfoAccurate /\ pc[SenderWriteID] \in {"sender_write_data"}
+    <2> free < Len(msg) BY DEF SenderInfoAccurate, PCOK
+    <2> QED BY DEF IntegrityI
+<1> QED BY BytesTransmittedEq DEF PCOK, SenderInfoAccurate
+
+(* The main result: if WriteLimit predicts we'll send n bytes, then we will.
+   Just a proof by induction using WriterProgress. *)
+WriterLive_prop(n) == WSpec => WriteLimit = n ~> BytesTransmitted >= n
+THEOREM WriterLive ==
+  ASSUME NEW n \in Nat
+  PROVE  WriterLive_prop(n)
+<1> DEFINE PC == pc[SenderWriteID]
+<1> SUFFICES ASSUME []WSpec
+             PROVE WriteLimit = n ~> BytesTransmitted >= n
+    BY PTL DEF WSpec, WriterLive_prop
+<1> I /\ IntegrityI /\ PCOK /\ TypeOK BY PTL DEF WSpec, I, IntegrityI
+<1> DEFINE R(i) == WDist(n, i) ~> WDist(n, 0)
+<1>1 R(0) BY PTL
+<1>2 ASSUME NEW i \in Nat, R(i) PROVE R(i+1)
+    <2> WriterProgress_prop(n, i) BY WriterProgress
+    <2> QED BY PTL, <1>2 DEF WriterProgress_prop
+<1> \A i \in Nat : R(i)
+    <2> HIDE DEF R
+    <2> QED BY Isa, NatInduction, <1>1, <1>2
+<1> WDist(n, 0) => BytesTransmitted >= n
+    <2> SUFFICES ASSUME WriteLimit >= n /\ Len(Sent) - Len(msg) + 0 >= n
+                 PROVE Len(Sent) - Len(msg) >= n BY BytesTransmittedEq DEF WDist
+    <2> QED BY LengthFacts
+<1> SUFFICES ASSUME WriteLimit = n PROVE <>(BytesTransmitted >= n) BY PTL
+<1> WDist(n, Len(msg))
+    <2> WriteLimit >= n OBVIOUS
+    <2> WriteLimit <= Len(Sent) BY WriteLimitLimit
+    <2> QED BY LengthFacts, BytesTransmittedEq DEF WDist
+<1> SUFFICES R(Len(msg))
+    <2> R(Len(msg)) => <>WDist(n, 0) BY PTL
+    <2> QED BY PTL
+<1> HIDE DEF R
+<1> QED BY LengthFacts
+
+(* Once SenderLive is FALSE, it stays that way. *)
+LEMMA SenderLiveFinal ==
+  [][Next]_vars => (~SenderLive => []~SenderLive)
+<1> ASSUME [Next]_vars
+    PROVE ~SenderLive => ~SenderLive'
+    <2> [sender_open]_SenderLive BY UnchangedFacts
+    <2> CASE sender_open BY DEF sender_open
+    <2> QED OBVIOUS
+<1> QED BY PTL DEF Spec
+
+(* Only needed because of the bad definition of WriteLimitCorrect. *)
+LEMMA SenderFairEnabled ==
+  ASSUME TypeOK, PCOK
+  PROVE  ENABLED <<SenderFair>>_vars =>
+         pc[SenderWriteID] # "sender_ready" /\ ENABLED <<SenderWrite>>_vars
+<1> <<SenderWrite>>_vars <=> SenderWrite
+    <2> SUFFICES ASSUME SenderWrite PROVE vars # vars' OBVIOUS
+    <2> QED BY DEF SenderFair, SenderWrite, sender_ready, sender_write, sender_request_notify,
+                    sender_recheck_len, sender_write_data,
+                    sender_check_notify_data, sender_notify_data,
+                    sender_blocked, sender_check_recv_live, PCOK, vars
+<1> ENABLED <<SenderFair>>_vars <=> ENABLED SenderFair
+    <2> <<SenderFair>>_vars <=> SenderFair
+        <3> SUFFICES ASSUME SenderFair PROVE vars # vars' OBVIOUS
+        <3> QED BY DEF SenderFair, vars
+    <2> QED BY ENABLEDaxioms
+<1> ENABLED <<SenderWrite>>_vars <=> ENABLED SenderWrite
+    <2> QED BY ENABLEDaxioms
+<1> DEFINE P == pc[SenderWriteID] # "sender_ready"
+<1> DEFINE A == SenderWrite
+<1> SUFFICES ASSUME ENABLED (P /\ A) PROVE P /\ ENABLED A BY DEF SenderFair
+<1> P \in BOOLEAN BY DEF TypeOK
+<1> A \in BOOLEAN BY DEF SenderWrite, sender_ready, sender_write, sender_request_notify,
+                          sender_recheck_len, sender_write_data,
+                          sender_check_notify_data, sender_notify_data,
+                          sender_blocked, sender_check_recv_live
+<1> QED BY ENABLEDaxioms
+
+(* WriterLive is the interesting result, but might as well use it to prove
+   our old (weaker) WriteLimitCorrect. *)
+COROLLARY I /\ [][Next]_vars => WriteLimitCorrect
+<1> SUFFICES ASSUME []I, [][Next]_vars PROVE WriteLimitCorrect
+    BY PTL, NextPreservesI
+<1> DEFINE A(i) == WriteLimit = i ~> Len(Got) + Len(Buffer) >= i \/ ~SenderLive \/ ~ReceiverLive
+<1> WF_vars(SenderWrite) => \A i \in AvailabilityNat : A(i)
+    <2> HIDE DEF A
+    <2> SUFFICES ASSUME WF_vars(SenderWrite), NEW i \in Nat
+                 PROVE A(i)
+        BY DEF AvailabilityNat
+    <2> USE DEF A
+    <2> ~[]CleanShutdownOnly => A(i)
+        (* Unclean shutdowns trivially satisfy WriteLimitCorrect,
+           so handle that case separately. *)
+        <3> ~[]CleanShutdownOnly => <>~CleanShutdownOnly BY PTL
+        <3> ~CleanShutdownOnly => ~SenderLive BY DEF CleanShutdownOnly
+        <3> ~[]CleanShutdownOnly => <>~SenderLive BY PTL
+        <3> <>~SenderLive => <>[]~SenderLive BY PTL, SenderLiveFinal
+        <3> QED BY PTL
+    <2> ~[]ReceiverLive => A(i)
+        (* Likewise, receiver shutdowns satisfy WriteLimitCorrect. *)
+        BY PTL, ReceiverLiveFinal
+    <2> ASSUME []CleanShutdownOnly, []ReceiverLive
+        PROVE  A(i)
+        (* The interesting case, where we actually have to deliver the data. *)
+        <3> WF_vars(SenderFair)
+            (* WriteLimitCorrect only requires fairness of SenderWrite, which
+               implies fairness of SenderFair. *)
+            <4> SUFFICES []ENABLED <<SenderFair>>_vars => <> <<SenderFair>>_vars BY PTL
+            <4> TypeOK /\ PCOK BY PTL DEF I, IntegrityI
+            <4> ENABLED <<SenderFair>>_vars =>
+                  pc[SenderWriteID] # "sender_ready" /\ ENABLED <<SenderWrite>>_vars
+                BY SenderFairEnabled
+            <4> pc[SenderWriteID] # "sender_ready" /\ <<SenderWrite>>_vars => <<SenderFair>>_vars
+                BY DEF SenderFair
+            <4> QED BY PTL
+        <3> WSpec BY DEF WSpec
+        <3> WriterLive_prop(i) BY WriterLive
+        <3> WriteLimit = i ~> BytesTransmitted >= i BY DEF WriterLive_prop
+        <3> SUFFICES ASSUME WriteLimit = i
+                     PROVE <> \/ Len(Got) + Len(Buffer) >= i
+                              \/ ~SenderLive
+                              \/ ~ReceiverLive
+            BY PTL DEF A
+        <3> QED BY PTL
+    <2> QED BY PTL
+<1> [][WriteLimit' >= WriteLimit \/ pc'[SenderWriteID] = "Done"]_vars
+    <2> ASSUME [Next]_vars, I
+        PROVE  WriteLimit' >= WriteLimit \/ pc'[SenderWriteID] = "Done"
+        <3> CASE pc'[SenderWriteID] # "Done" BY WriteLimitMonotonic
+        <3> QED OBVIOUS
+    <2> QED BY PTL
+<1> [][SenderWrite => \/ UNCHANGED WriteLimit
+                      \/ pc[SenderWriteID] \in {"sender_ready"}
+                      \/ pc'[SenderWriteID] \in {"Done"}]_vars
+    <2> ASSUME [Next]_vars, I, SenderWrite
+        PROVE  \/ UNCHANGED WriteLimit
+               \/ pc[SenderWriteID] \in {"sender_ready"}
+               \/ pc'[SenderWriteID] \in {"Done"}
+        <3> CASE ~sender_ready /\ pc[SenderWriteID]' # "Done"
+            BY SenderWritePreservesWriteLimit
+        <3> CASE sender_ready BY DEF sender_ready
+        <3> QED OBVIOUS
+    <2> QED BY PTL
+<1> QED BY PTL DEF WriteLimitCorrect
 
 -----------------------------------------------------------------------------
 
