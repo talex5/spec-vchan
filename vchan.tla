@@ -969,6 +969,31 @@ LEMMA UnchangedFacts ==
 <1>5 CASE SpuriousInterrupts BY <1>5 DEF SpuriousInterrupts, spurious
 <1> QED BY <1>1, <1>2, <1>3, <1>4, <1>5 DEF Next, vars
 
+(* Each process only modifies its own PC. *)
+LEMMA UnchangedPC ==
+  ASSUME [Next]_vars, PCOK
+  PROVE  /\ [SenderWrite]_(pc[SenderWriteID])
+         /\ [SenderClose]_(pc[SenderCloseID])
+         /\ [ReceiverRead]_(pc[ReceiverReadID])
+         /\ [ReceiverClose]_(pc[ReceiverCloseID])
+         /\ SenderWrite => ~(SenderClose \/ ReceiverRead \/ ReceiverClose)
+         /\ SenderClose => ~(SenderWrite \/ ReceiverRead \/ ReceiverClose)
+         /\ ReceiverRead => ~(SenderClose \/ SenderWrite \/ ReceiverClose)
+         /\ ReceiverClose => ~(SenderClose \/ ReceiverRead \/ SenderWrite)
+BY DEF Next, vars, PCOK,
+       SenderWriteID, SenderCloseID, ReceiverReadID, ReceiverCloseID,
+       SenderWrite, sender_ready, sender_write, sender_request_notify,
+            sender_recheck_len, sender_write_data,
+            sender_check_notify_data, sender_notify_data,
+            sender_blocked, sender_check_recv_live,
+       SenderClose, sender_open, sender_notify_closed,
+       ReceiverRead, recv_init, recv_ready, recv_reading, recv_got_len,
+            recv_recheck_len, recv_read_data,
+            recv_check_notify_read, recv_notify_read,
+            recv_await_data, recv_final_check,
+       ReceiverClose, recv_open, recv_notify_closed,
+       SpuriousInterrupts, spurious
+
 \* The only operations we do on messages are to split and join them.
 \* TLAPS needs a lot of help to prove facts about this, so do it here all in one place:
 LEMMA TakeDropFacts ==
@@ -1952,14 +1977,7 @@ LEMMA MonotonicLenGot ==
         <3> QED BY LengthFacts
     <2> QED BY DEF recv_read_data
 <1> CASE ~recv_read_data
-    <2> UNCHANGED Got
-      BY DEF Next, vars, SenderWrite, SenderClose, ReceiverRead, ReceiverClose, SpuriousInterrupts,
-             spurious,
-             recv_open, recv_notify_closed, recv_init, recv_ready, recv_reading, recv_got_len, recv_recheck_len,
-             recv_read_data, recv_check_notify_read, recv_notify_read, recv_final_check, recv_await_data,
-             sender_open, sender_notify_closed,
-             sender_ready, sender_write, sender_request_notify, sender_recheck_len, sender_write_data,
-             sender_check_notify_data, sender_notify_data, sender_blocked, sender_check_recv_live
+    <2> UNCHANGED Got BY UnchangedFacts
     <2> QED OBVIOUS
 <1> QED OBVIOUS
 
@@ -2095,19 +2113,7 @@ LEMMA Enabled_ReceiverRead ==
 (* Only ReceiverRead steps change the ReceiverRead PC or its private variables. *)
 LEMMA ReceiverReadPrivate ==
   PCOK /\ [Next]_vars => [ReceiverRead]_<<pc[ReceiverReadID], have, Got>>
-<1> SUFFICES ASSUME PCOK, Next
-             PROVE [ReceiverRead]_<<pc[ReceiverReadID], have, Got>>
-    BY DEF vars, Next
-<1>1 CASE ReceiverRead BY <1>1
-<1>2 ASSUME ~ReceiverRead PROVE UNCHANGED <<pc[ReceiverReadID], have, Got>>
-    <2> USE <1>2 DEF PCOK
-    <2>1 CASE SenderWrite BY <2>1 DEF SenderWrite, sender_ready, sender_write, sender_request_notify, sender_recheck_len, sender_write_data,
-                 sender_check_notify_data, sender_notify_data, sender_blocked, sender_check_recv_live
-    <2>2 CASE SenderClose BY <2>2 DEF SenderClose, sender_open, sender_notify_closed
-    <2>3 CASE ReceiverClose BY <2>3 DEF ReceiverClose, recv_open, recv_notify_closed
-    <2>4 CASE SpuriousInterrupts BY <2>4 DEF SpuriousInterrupts, spurious
-    <2> QED BY <2>1, <2>2, <2>3, <2>4 DEF Next, vars
-<1> QED BY <1>1, <1>2
+BY UnchangedFacts, UnchangedPC DEF ReceiverRead
 
 (* Now proofs about when each of the receiver steps makes progress. *)
 
@@ -2124,17 +2130,7 @@ LEMMA Progress_recv_steps ==
 <1>1 S /\ ReceiverRead => G' BY NextPC_recv_correct DEF NextPC_recv, PCOK
 <1>2 S /\ [Next]_vars => (S \/ G)'
     <2> CASE ReceiverRead BY <1>1
-    <2> CASE ~ReceiverRead /\ UNCHANGED <<pc[ReceiverReadID], have, Got>>
-        <3> ASSUME S, [Next]_vars, DataReadyInt PROVE DataReadyInt'
-            BY DEF Next, vars, PCOK,
-                   SenderWrite, sender_ready, sender_write, sender_request_notify,
-                    sender_recheck_len, sender_write_data,
-                    sender_check_notify_data, sender_notify_data,
-                    sender_blocked, sender_check_recv_live,
-                   SenderClose, sender_open, sender_notify_closed,
-                   ReceiverClose, recv_open, recv_notify_closed,
-                   SpuriousInterrupts, spurious
-        <3> QED OBVIOUS
+    <2> CASE UNCHANGED pc[ReceiverReadID] OBVIOUS
     <2> QED BY ReceiverReadPrivate
 <1>3 S => ENABLED(<<ReceiverRead>>_vars) BY Enabled_ReceiverRead
 <1> QED BY <1>1, <1>2, <1>3, PTL DEF RSpec
@@ -2934,10 +2930,7 @@ THEOREM WriteLimitMonotonic ==
 <1>3. CASE ReceiverRead
       <2> USE <1>3
       <2> UNCHANGED << pc[SenderWriteID], pc[SenderCloseID], pc[ReceiverCloseID] >>
-        BY DEF ReceiverRead, recv_init, recv_ready, recv_reading, recv_got_len,
-                  recv_recheck_len, recv_read_data,
-                  recv_check_notify_read, recv_notify_read,
-                  recv_await_data, recv_final_check, PCOK
+          BY UnchangedPC
       <2>1. CASE \/ recv_init \/ recv_ready \/ recv_reading \/ recv_got_len
                  \/ recv_recheck_len \/ recv_check_notify_read
                  \/ recv_await_data \/ recv_final_check
