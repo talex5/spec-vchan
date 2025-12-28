@@ -1073,6 +1073,7 @@ LEMMA LengthFacts ==
   ASSUME TypeOK
   PROVE  /\ Buffer \in FINITE_MESSAGE(BufferSize)
          /\ msg \in FINITE_MESSAGE(MaxWriteLen)
+         /\ Sent \in MESSAGE
          /\ Got \in MESSAGE
          /\ free \in 0..BufferSize
          /\ BufferSize \in Nat \ {0}
@@ -1674,6 +1675,14 @@ ISpec ==
 
 THEOREM SpecToISpec == Spec => ISpec
 BY AlwaysI DEF Spec, ISpec
+
+BytesTransmitted == Len(Got) + Len(Buffer)
+USE DEF BytesTransmitted
+
+LEMMA BytesTransmittedEq ==
+  ASSUME IntegrityI
+  PROVE  BytesTransmitted = Len(Sent) - Len(msg)
+<1> QED BY LengthFacts DEF IntegrityI, BytesTransmitted
 
 -----------------------------------------------------------------------------
 
@@ -2405,7 +2414,7 @@ ReadAllCondition_prop(n) ==
      /\ ISpec
      /\ SenderLive
      /\ pc[SenderWriteID] \in {"sender_ready", "sender_blocked"}
-     /\ Len(Got) + Len(Buffer) = n   (* If we've sent n bytes in total... *)
+     /\ BytesTransmitted = n         (* If we've sent n bytes in total... *)
      ~> \/ Len(Got) >= n             (* then at least n bytes will eventually be received. *)
         \/ ~ReceiverLive
 LEMMA ReadAllCondition == 
@@ -2470,7 +2479,7 @@ LEMMA ReaderLiveness ==
            \/ pc[SenderWriteID] = "sender_blocked",
            Len(Sent) = n + Len(msg)
     PROVE /\ pc[SenderWriteID] \in {"sender_ready", "sender_blocked"}
-          /\ Len(Got) + Len(Buffer) = n
+          /\ BytesTransmitted = n
     <2> TypeOK BY DEF IntegrityI
     <2> Sent = (Got \o Buffer) \o msg BY DEF IntegrityI
     <2> Len(Sent) = Len(Got) + Len(Buffer) + Len(msg) BY ConcatFacts, LengthFacts
@@ -2489,13 +2498,12 @@ LEMMA ReaderLiveness ==
    closed by either end. *)
 WriteLimit ==
   LET PC == pc[SenderWriteID] IN
-  LET current == Len(Got) + Len(Buffer) IN
   IF SenderInfoAccurate THEN Len(Got) + Min(BufferSize, Len(Buffer) + Len(msg))
   ELSE
     CASE PC \in {"sender_write_data"} ->
-                current + free  \* Will write and block
+                BytesTransmitted + free  \* Will write and block
       [] PC \in {"sender_check_notify_data", "sender_notify_data", "sender_blocked"} ->
-                current         \* Will block
+                BytesTransmitted         \* Will block
 
 (* If WriteLimit says we will send some amount of data then we will eventually send
    at least that much data (or close the connection).
@@ -2870,6 +2878,19 @@ LEMMA NotifySenderWriteLimit ==
           <4> QED BY DEF SenderInfoAccurate, PCOK
       <3> QED OBVIOUS
 <1> QED BY <1>1, <1>2
+
+LEMMA WriteLimitType ==
+  ASSUME I
+  PROVE  WriteLimit \in Nat
+<1> TypeOK /\ PCOK BY PTL DEF I, IntegrityI
+<1> CASE SenderInfoAccurate
+    BY LengthFacts, BufferSizeType DEF WriteLimit, PCOK, Min
+<1> CASE ~SenderInfoAccurate
+    <2> CASE pc[SenderWriteID] \in {"sender_write_data"} BY LengthFacts, BufferSizeType DEF WriteLimit, PCOK, Min
+    <2> CASE pc[SenderWriteID] \in {"sender_check_notify_data", "sender_notify_data", "sender_blocked"}
+        BY LengthFacts, BufferSizeType DEF WriteLimit, PCOK, Min
+    <2> QED BY DEF PCOK, SenderInfoAccurate, WriteLimit
+<1> QED BY LengthFacts, BufferSizeType DEF WriteLimit, PCOK
 
 (* WriteLimit never decreases (unless the sender or receiver decides to close the connection). *)
 THEOREM WriteLimitMonotonic ==
