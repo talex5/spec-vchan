@@ -937,6 +937,38 @@ TypeOKI ==
 \* Proof of Spec => []I
 \* These proofs have all been verified automatically by TLAPS.
 
+(* For each variable, says which actions may modify it. *)
+LEMMA UnchangedFacts ==
+  ASSUME [Next]_vars
+  PROVE  /\ [sender_open]_SenderLive
+         /\ [recv_open]_ReceiverLive
+         /\ [sender_write_data \/ recv_read_data]_Buffer
+         /\ [sender_check_notify_data \/ recv_got_len]_NotifyWrite
+         /\ [sender_notify_data \/ sender_notify_closed \/ recv_await_data \/ spurious]_DataReadyInt
+         /\ [sender_request_notify \/ recv_check_notify_read]_NotifyRead
+         /\ [sender_blocked \/ recv_notify_read \/ recv_notify_closed \/ spurious]_SpaceAvailableInt
+         /\ [sender_write \/ sender_recheck_len \/ sender_write_data]_free
+         /\ [sender_ready \/ sender_write_data]_msg
+         /\ [sender_ready]_Sent
+         /\ [recv_reading \/ recv_recheck_len \/ recv_read_data]_have
+         /\ [recv_read_data]_Got
+<1>1 CASE SenderWrite
+    BY <1>1 DEF SenderWrite, sender_ready, sender_write, sender_request_notify,
+                sender_recheck_len, sender_write_data,
+                sender_check_notify_data, sender_notify_data,
+                sender_blocked, sender_check_recv_live
+<1>2 CASE SenderClose
+    BY <1>2 DEF SenderClose, sender_open, sender_notify_closed
+<1>3 CASE ReceiverRead
+    BY <1>3 DEF ReceiverRead, recv_init, recv_ready, recv_reading, recv_got_len,
+                recv_recheck_len, recv_read_data,
+                recv_check_notify_read, recv_notify_read,
+                recv_await_data, recv_final_check
+<1>4 CASE ReceiverClose
+    BY <1>4 DEF ReceiverClose, recv_open, recv_notify_closed
+<1>5 CASE SpuriousInterrupts BY <1>5 DEF SpuriousInterrupts, spurious
+<1> QED BY <1>1, <1>2, <1>3, <1>4, <1>5 DEF Next, vars
+
 \* The only operations we do on messages are to split and join them.
 \* TLAPS needs a lot of help to prove facts about this, so do it here all in one place:
 LEMMA TakeDropFacts ==
@@ -2347,36 +2379,9 @@ LEMMA ReceiverLiveFinal ==
   [][Next]_vars => (~ReceiverLive => []~ReceiverLive)
 <1> ASSUME [Next]_vars
     PROVE ~ReceiverLive => ~ReceiverLive'
-      <2>1. CASE sender_ready BY <2>1 DEF sender_ready
-      <2>2. CASE sender_write BY <2>2 DEF sender_write
-      <2>3. CASE sender_request_notify BY <2>3 DEF sender_request_notify
-      <2>4. CASE sender_recheck_len BY <2>4 DEF sender_recheck_len
-      <2>5. CASE sender_write_data BY <2>5 DEF sender_write_data
-      <2>6. CASE sender_check_notify_data BY <2>6 DEF sender_check_notify_data
-      <2>7. CASE sender_notify_data BY <2>7 DEF sender_notify_data
-      <2>8. CASE sender_blocked BY <2>8 DEF sender_blocked
-      <2>9. CASE sender_check_recv_live BY <2>9 DEF sender_check_recv_live
-      <2>10. CASE sender_open BY <2>10 DEF sender_open
-      <2>11. CASE sender_notify_closed BY <2>11 DEF sender_notify_closed
-      <2>12. CASE recv_init BY <2>12 DEF recv_init
-      <2>13. CASE recv_ready BY <2>13 DEF recv_ready
-      <2>14. CASE recv_reading BY <2>14 DEF recv_reading
-      <2>15. CASE recv_got_len BY <2>15 DEF recv_got_len
-      <2>16. CASE recv_recheck_len BY <2>16 DEF recv_recheck_len
-      <2>17. CASE recv_read_data BY <2>17 DEF recv_read_data
-      <2>18. CASE recv_check_notify_read BY <2>18 DEF recv_check_notify_read
-      <2>19. CASE recv_notify_read BY <2>19 DEF recv_notify_read
-      <2>20. CASE recv_final_check BY <2>20 DEF recv_final_check
-      <2>21. CASE recv_await_data BY <2>21 DEF recv_await_data
-      <2>22. CASE recv_open BY <2>22 DEF recv_open
-      <2>23. CASE recv_notify_closed BY <2>23 DEF recv_notify_closed
-      <2>24. CASE SpuriousInterrupts BY <2>24 DEF SpuriousInterrupts, spurious
-      <2>25. CASE UNCHANGED vars BY <2>25 DEF vars
-      <2>26. QED
-        BY <2>1, <2>2, <2>3, <2>4, <2>5, <2>6, <2>7, <2>8, <2>9,
-           <2>10, <2>11, <2>12, <2>13, <2>14, <2>15, <2>16, <2>17, <2>18, <2>19,
-           <2>20, <2>21, <2>22, <2>23, <2>24, <2>25
-        DEF Next, ReceiverClose, ReceiverRead, SenderClose, SenderWrite
+    <2> [recv_open]_ReceiverLive BY UnchangedFacts
+    <2> CASE recv_open BY DEF recv_open
+    <2> QED OBVIOUS
 <1> QED BY PTL DEF Spec
 
 (* Like ReadLimitEventually, but in terms of ISpec rather than RSpec. *)
