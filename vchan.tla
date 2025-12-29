@@ -2560,7 +2560,7 @@ WSpec ==
    This should be checked without weak fairness (so just I /\ [][Next]_vars).
    TODO: Would make more sense to check WF_vars(SenderFair). *)
 WriteLimitCorrect ==
-  /\ WF_vars(SenderWrite) =>
+  /\ WF_vars(SenderFair) =>
       \A i \in AvailabilityNat :
         WriteLimit = i ~> Len(Got) + Len(Buffer) >= i \/ ~SenderLive \/ ~ReceiverLive
   \* WriteLimit can only decrease if we decide to shut down:
@@ -3643,45 +3643,17 @@ LEMMA SenderLiveFinal ==
     <2> QED OBVIOUS
 <1> QED BY PTL DEF Spec
 
-(* Only needed because of the bad definition of WriteLimitCorrect. *)
-LEMMA SenderFairEnabled ==
-  ASSUME TypeOK, PCOK
-  PROVE  ENABLED <<SenderFair>>_vars =>
-         pc[SenderWriteID] # "sender_ready" /\ ENABLED <<SenderWrite>>_vars
-<1> <<SenderWrite>>_vars <=> SenderWrite
-    <2> SUFFICES ASSUME SenderWrite PROVE vars # vars' OBVIOUS
-    <2> QED BY DEF SenderFair, SenderWrite, sender_ready, sender_write, sender_request_notify,
-                    sender_recheck_len, sender_write_data,
-                    sender_check_notify_data, sender_notify_data,
-                    sender_blocked, sender_check_recv_live, PCOK, vars
-<1> ENABLED <<SenderFair>>_vars <=> ENABLED SenderFair
-    <2> <<SenderFair>>_vars <=> SenderFair
-        <3> SUFFICES ASSUME SenderFair PROVE vars # vars' OBVIOUS
-        <3> QED BY DEF SenderFair, vars
-    <2> QED BY ENABLEDaxioms
-<1> ENABLED <<SenderWrite>>_vars <=> ENABLED SenderWrite
-    <2> QED BY ENABLEDaxioms
-<1> DEFINE P == pc[SenderWriteID] # "sender_ready"
-<1> DEFINE A == SenderWrite
-<1> SUFFICES ASSUME ENABLED (P /\ A) PROVE P /\ ENABLED A BY DEF SenderFair
-<1> P \in BOOLEAN BY DEF TypeOK
-<1> A \in BOOLEAN BY DEF SenderWrite, sender_ready, sender_write, sender_request_notify,
-                          sender_recheck_len, sender_write_data,
-                          sender_check_notify_data, sender_notify_data,
-                          sender_blocked, sender_check_recv_live
-<1> QED BY ENABLEDaxioms
-
 (* WriterLive is the interesting result, but might as well use it to prove
    our old (weaker) WriteLimitCorrect. *)
 COROLLARY I /\ [][Next]_vars => WriteLimitCorrect
 <1> SUFFICES ASSUME []I, [][Next]_vars PROVE WriteLimitCorrect
     BY PTL, NextPreservesI
 <1> DEFINE A(i) == WriteLimit = i ~> Len(Got) + Len(Buffer) >= i \/ ~SenderLive \/ ~ReceiverLive
-<1> WF_vars(SenderWrite) => \A i \in AvailabilityNat : A(i)
+<1> WF_vars(SenderFair) => \A i \in AvailabilityNat : A(i)
     <2> HIDE DEF A
-    <2> SUFFICES ASSUME WF_vars(SenderWrite), NEW i \in Nat
+    <2> SUFFICES ASSUME WF_vars(SenderFair), NEW i \in Nat
                  PROVE A(i)
-        BY DEF AvailabilityNat
+        BY DEF AvailabilityNat, SenderFair
     <2> USE DEF A
     <2> ~[]CleanShutdownOnly => A(i)
         (* Unclean shutdowns trivially satisfy WriteLimitCorrect,
@@ -3697,17 +3669,6 @@ COROLLARY I /\ [][Next]_vars => WriteLimitCorrect
     <2> ASSUME []CleanShutdownOnly, []ReceiverLive
         PROVE  A(i)
         (* The interesting case, where we actually have to deliver the data. *)
-        <3> WF_vars(SenderFair)
-            (* WriteLimitCorrect only requires fairness of SenderWrite, which
-               implies fairness of SenderFair. *)
-            <4> SUFFICES []ENABLED <<SenderFair>>_vars => <> <<SenderFair>>_vars BY PTL
-            <4> TypeOK /\ PCOK BY PTL DEF I, IntegrityI
-            <4> ENABLED <<SenderFair>>_vars =>
-                  pc[SenderWriteID] # "sender_ready" /\ ENABLED <<SenderWrite>>_vars
-                BY SenderFairEnabled
-            <4> pc[SenderWriteID] # "sender_ready" /\ <<SenderWrite>>_vars => <<SenderFair>>_vars
-                BY DEF SenderFair
-            <4> QED BY PTL
         <3> WSpec BY DEF WSpec
         <3> WriterLive_prop(i) BY WriterLive
         <3> WriteLimit = i ~> BytesTransmitted >= i BY DEF WriterLive_prop
