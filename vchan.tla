@@ -1754,13 +1754,57 @@ ReadLimitCorrect ==
   \* ReceiverRead steps don't change the read limit:
   /\ [][ReceiverRead => UNCHANGED ReadLimit \/ ~ReceiverLive]_vars
 
+(* A stronger form of I that holds when running with []CleanShutdownOnly /\ []ReceiverLive *)
+CleanShutdownI ==
+  /\ I
+  /\ pc[ReceiverReadID] \in {"Done"} => Len(Buffer) = 0
+
+LEMMA AlwaysCleanShutdownI ==
+  ASSUME []CleanShutdownOnly, []ReceiverLive
+  PROVE  Spec => []CleanShutdownI
+<1> USE DEF CleanShutdownI, CleanShutdownOnly
+<1> Spec => CleanShutdownI
+    <2> SUFFICES ASSUME Spec PROVE CleanShutdownI OBVIOUS
+    <2> I BY PTL, AlwaysI DEF Spec
+    <2> QED BY DEF Spec, Init
+<1> [Next]_vars /\ CleanShutdownI => CleanShutdownI'
+    <2> SUFFICES ASSUME [Next]_vars, CleanShutdownI
+                 PROVE  CleanShutdownI'
+        OBVIOUS
+    <2> I /\ IntegrityI /\ PCOK /\ TypeOK /\ CloseOK /\ ReceiverLive
+        BY PTL DEF CleanShutdownI, I, IntegrityI
+    <2> SUFFICES ASSUME pc[ReceiverReadID] \in {"Done"} => Len(Buffer) = 0,
+                        pc[ReceiverReadID]' \in {"Done"}
+                 PROVE  Len(Buffer') = 0
+        BY NextPreservesI
+    <2> CleanShutdownOnly BY PTL
+    <2> [sender_write_data \/ recv_read_data]_Buffer BY UnchangedFacts
+    <2> CASE ReceiverRead
+        (* recv_final_check is the only step that moves to Done if ReceiverLive,
+           and it only does that if Buffer is empty. *)
+        BY DEF ReceiverRead, recv_init, recv_ready, recv_reading, recv_got_len,
+                recv_recheck_len, recv_read_data,
+                recv_check_notify_read, recv_notify_read,
+                recv_await_data, recv_final_check, PCOK
+    <2> CASE ~ReceiverRead
+        <3> UNCHANGED pc[ReceiverReadID] /\ [sender_write_data]_Buffer
+            BY UnchangedPC DEF ReceiverRead
+        <3> ASSUME sender_write_data PROVE FALSE
+            <4> msg # << >> BY DEF IntegrityI, sender_write_data
+            <4> ~SenderLive BY DEF CloseOK
+            <4> QED BY LengthFacts DEF CleanShutdownOnly
+        <3> QED OBVIOUS
+    <2> QED OBVIOUS
+<1> QED BY PTL DEF Spec
+
 (* Whenever the sender is blocked or idle, the receiver can read everything in
    the buffer without further action from any other process. *)
 THEOREM ReadAllIfSenderBlocked ==
-  ASSUME I, SenderLive, ReceiverLive,
+  ASSUME I, (SenderLive \/ CleanShutdownI), ReceiverLive,
          \/ pc[SenderWriteID] = "sender_ready"
-         \/ pc[SenderWriteID] = "sender_blocked" /\ ~SpaceAvailableInt
-  PROVE  ReadLimit = Len(Got) + Len(Buffer)
+         \/ pc[SenderWriteID] = "sender_blocked"
+         \/ pc[SenderWriteID] = "Done"
+  PROVE  ReadLimit = BytesTransmitted
 <1> IntegrityI BY DEF I
 <1> PCOK BY DEF IntegrityI
 <1> TypeOK BY DEF IntegrityI
@@ -1792,7 +1836,13 @@ THEOREM ReadAllIfSenderBlocked ==
         <3> Len(Buffer) = 0 BY DEF ReaderInfoAccurate
         <3> QED BY DEF ReadLimit
     <2> QED OBVIOUS
-<1> CASE pc[ReceiverReadID] \in {"Done"} BY DEF CloseOK
+<1> CASE pc[ReceiverReadID] \in {"Done"}
+    <2> CASE CleanShutdownI
+        <3> Len(Buffer) = 0 BY DEF CleanShutdownI
+        <3> ReadLimit = Len(Got) BY DEF ReadLimit
+        <3> QED OBVIOUS
+    <2> CASE SenderLive BY DEF CloseOK
+    <2> QED OBVIOUS
 <1> QED BY DEF PCOK
 
 (* ReceiverRead steps don't change ReadLimit, as long as the receiver hasn't closed
