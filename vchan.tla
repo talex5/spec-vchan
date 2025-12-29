@@ -1757,15 +1757,16 @@ ReadLimitCorrect ==
 (* A stronger form of I that holds when running with []CleanShutdownOnly /\ []ReceiverLive *)
 CleanShutdownI ==
   /\ I
+  /\ CleanShutdownOnly
   /\ pc[ReceiverReadID] \in {"Done"} => Len(Buffer) = 0
 
 LEMMA AlwaysCleanShutdownI ==
   ASSUME []CleanShutdownOnly, []ReceiverLive
-  PROVE  Spec => []CleanShutdownI
+  PROVE  Init /\ [][Next]_vars => []CleanShutdownI
 <1> USE DEF CleanShutdownI, CleanShutdownOnly
-<1> Spec => CleanShutdownI
-    <2> SUFFICES ASSUME Spec PROVE CleanShutdownI OBVIOUS
-    <2> I BY PTL, AlwaysI DEF Spec
+<1> Init /\ [][Next]_vars => CleanShutdownI
+    <2> SUFFICES ASSUME Init /\ [][Next]_vars PROVE CleanShutdownI OBVIOUS
+    <2> I BY PTL, AlwaysI
     <2> QED BY DEF Spec, Init
 <1> [Next]_vars /\ CleanShutdownI => CleanShutdownI'
     <2> SUFFICES ASSUME [Next]_vars, CleanShutdownI
@@ -1773,11 +1774,11 @@ LEMMA AlwaysCleanShutdownI ==
         OBVIOUS
     <2> I /\ IntegrityI /\ PCOK /\ TypeOK /\ CloseOK /\ ReceiverLive
         BY PTL DEF CleanShutdownI, I, IntegrityI
+    <2> CleanShutdownOnly /\ CleanShutdownOnly' BY PTL
     <2> SUFFICES ASSUME pc[ReceiverReadID] \in {"Done"} => Len(Buffer) = 0,
                         pc[ReceiverReadID]' \in {"Done"}
                  PROVE  Len(Buffer') = 0
         BY NextPreservesI
-    <2> CleanShutdownOnly BY PTL
     <2> [sender_write_data \/ recv_read_data]_Buffer BY UnchangedFacts
     <2> CASE ReceiverRead
         (* recv_final_check is the only step that moves to Done if ReceiverLive,
@@ -1797,18 +1798,20 @@ LEMMA AlwaysCleanShutdownI ==
     <2> QED OBVIOUS
 <1> QED BY PTL DEF Spec
 
+SenderAtSafepoint ==
+  \/ pc[SenderWriteID] = "sender_ready"
+  \/ pc[SenderWriteID] = "sender_blocked"
+  \/ pc[SenderWriteID] = "Done"
+
 (* Whenever the sender is blocked or idle, the receiver can read everything in
    the buffer without further action from any other process. *)
 THEOREM ReadAllIfSenderBlocked ==
-  ASSUME I, (SenderLive \/ CleanShutdownI), ReceiverLive,
-         \/ pc[SenderWriteID] = "sender_ready"
-         \/ pc[SenderWriteID] = "sender_blocked"
-         \/ pc[SenderWriteID] = "Done"
+  ASSUME I, (SenderLive \/ CleanShutdownI), ReceiverLive, SenderAtSafepoint
   PROVE  ReadLimit = BytesTransmitted
 <1> IntegrityI BY DEF I
 <1> PCOK BY DEF IntegrityI
 <1> TypeOK BY DEF IntegrityI
-<1> USE LengthFacts
+<1> USE LengthFacts DEF SenderAtSafepoint
 <1> CloseOK BY DEF I
 <1> NotifyFlagsCorrect BY DEF I
 <1> CASE pc[ReceiverReadID] \in  {"recv_ready", "recv_reading", "recv_got_len",
@@ -2461,28 +2464,30 @@ LEMMA ReadLimitISpec ==
 
 (* When the sender is waiting, the receiver will get everything in the buffer.
    This eliminates ReadLimit and anything about the state of the receiver thread. *)
-ReadAllCondition_prop(n) ==
+ReaderLiveness_prop(n) ==
      /\ ISpec
-     /\ SenderLive
-     /\ pc[SenderWriteID] \in {"sender_ready", "sender_blocked"}
-     /\ BytesTransmitted = n         (* If we've sent n bytes in total... *)
+     /\ SenderLive \/ CleanShutdownI
+     /\ SenderAtSafepoint
+     /\ BytesTransmitted >= n        (* If we've sent n bytes in total... *)
      ~> \/ Len(Got) >= n             (* then at least n bytes will eventually be received. *)
         \/ ~ReceiverLive
-LEMMA ReadAllCondition == 
+LEMMA ReaderLiveness == 
   ASSUME NEW n \in Nat
-  PROVE ReadAllCondition_prop(n)
+  PROVE ReaderLiveness_prop(n)
 <1> SUFFICES ASSUME []ReceiverLive,
                     []ISpec
-             PROVE  /\ SenderLive
-                    /\ pc[SenderWriteID] \in {"sender_ready", "sender_blocked"}
-                    /\ Len(Got) + Len(Buffer) = n
+             PROVE  /\ SenderLive \/ CleanShutdownI
+                    /\ SenderAtSafepoint
+                    /\ BytesTransmitted >= n
                     ~> Len(Got) >= n
-    BY PTL, ReceiverLiveFinal DEF ISpec, ReadAllCondition_prop
+    BY PTL, ReceiverLiveFinal DEF ISpec, ReaderLiveness_prop
 <1> I BY PTL DEF ISpec, I
-<1> SenderLive /\ ReceiverLive /\ pc[SenderWriteID] \in {"sender_ready", "sender_blocked"}
+<1> ReceiverLive /\ (SenderLive \/ CleanShutdownI) /\ SenderAtSafepoint
     => ReadLimit = Len(Got) + Len(Buffer)
-    <2> SUFFICES ASSUME SenderLive, ReceiverLive, pc[SenderWriteID] \in {"sender_ready", "sender_blocked"}
-                 PROVE  ReadLimit = Len(Got) + Len(Buffer) OBVIOUS
+    <2> SUFFICES ASSUME ReceiverLive, SenderAtSafepoint,
+                        SenderLive \/ CleanShutdownI
+                 PROVE  ReadLimit = BytesTransmitted OBVIOUS
+    <2> USE DEF SenderAtSafepoint
     <2> IntegrityI /\ NotifyFlagsCorrect /\ CloseOK /\ PCOK /\ TypeOK BY DEF I, IntegrityI
     <2> CASE Len(Buffer) = 0 BY LengthFacts DEF ReadLimit, PCOK
     <2> DEFINE PC == pc[ReceiverReadID]
@@ -2502,43 +2507,20 @@ LEMMA ReadAllCondition ==
         <3> NotifyWrite BY DEF NotifyFlagsCorrect
         <3> ReaderInfoAccurate BY DEF I
         <3> QED BY DEF ReaderInfoAccurate
-    <2> CASE PC \in {"recv_final_check", "Done"} BY DEF CloseOK
+    <2> CASE PC = "recv_final_check" BY DEF ReadLimit, ReaderInfoAccurate
+    <2> CASE PC = "Done" /\ SenderLive BY DEF CloseOK
+    <2> CASE PC = "Done" /\ ~SenderLive /\ CleanShutdownI
+        <3> Len(Buffer) = 0 BY DEF CleanShutdownI
+        <3> QED OBVIOUS
     <2> QED BY DEF PCOK, ReadLimit, TypeOK
-<1> SUFFICES ASSUME ISpec, I, ReceiverLive, SenderLive,
-                    pc[SenderWriteID] \in {"sender_ready", "sender_blocked"},
-                    Len(Got) + Len(Buffer) = n
+<1> SUFFICES ASSUME ISpec, I, ReceiverLive,
+                    SenderLive \/ CleanShutdownI,
+                    SenderAtSafepoint,
+                    BytesTransmitted >= n
              PROVE  <>(Len(Got) >= n)
    BY PTL
-<1> Len(Got) + Len(Buffer) = n => ReadLimit >= n OBVIOUS
+<1> BytesTransmitted >= n => ReadLimit >= n OBVIOUS
 <1> QED BY PTL, ReadLimitISpec
-
-(* When the sender is waiting, the receiver will get everything sent. *)
-ReaderLiveness_prop(n) ==
-        /\ ISpec
-        /\ SenderLive
-        /\ \/ pc[SenderWriteID] = "sender_ready"
-           \/ pc[SenderWriteID] = "sender_blocked"
-        /\ Len(Sent) = n + Len(msg)
-        ~> \/ Len(Got) >= n
-           \/ ~ReceiverLive 
-LEMMA ReaderLiveness ==
-  ASSUME NEW n \in Nat
-  PROVE ReaderLiveness_prop(n)
-<1> ReadAllCondition_prop(n) BY ReadAllCondition
-<1> ASSUME IntegrityI,
-           \/ pc[SenderWriteID] = "sender_ready"
-           \/ pc[SenderWriteID] = "sender_blocked",
-           Len(Sent) = n + Len(msg)
-    PROVE /\ pc[SenderWriteID] \in {"sender_ready", "sender_blocked"}
-          /\ BytesTransmitted = n
-    <2> TypeOK BY DEF IntegrityI
-    <2> Sent = (Got \o Buffer) \o msg BY DEF IntegrityI
-    <2> Len(Sent) = Len(Got) + Len(Buffer) + Len(msg) BY ConcatFacts, LengthFacts
-    <2> n + Len(msg) = Len(Got) + Len(Buffer) + Len(msg) OBVIOUS
-    <2> n = Len(Got) + Len(Buffer) BY LengthFacts
-    <2> pc[SenderWriteID] \in {"sender_ready", "sender_blocked"} OBVIOUS
-    <2> QED OBVIOUS
-<1> QED BY PTL DEF ISpec, I, ReadAllCondition_prop, ReaderLiveness_prop
 
 -----------------------------------------------------------------------------
 
@@ -3706,18 +3688,16 @@ THEOREM Spec => Availability
              \/ ~ReceiverLive
     <2> x = Len(Sent) => Len(Sent) = x OBVIOUS
     <2> QED BY PTL
-<1> ReaderLiveness_prop(x) BY ReaderLiveness
 <1> /\ SenderLive
-    /\ \/ pc[SenderWriteID] = "sender_ready"
-       \/ pc[SenderWriteID] = "sender_blocked"
-    /\ Len(Sent) = x + Len(msg)
+    /\ pc[SenderWriteID] = "sender_ready"
+    /\ BytesTransmitted >= x
     ~> \/ Len(Got) >= x
-       \/ ~ReceiverLive 
-   BY PTL DEF ReaderLiveness_prop
+       \/ ~ReceiverLive
+   <2> ReaderLiveness_prop(x) BY ReaderLiveness
+   <2> QED BY PTL DEF ReaderLiveness_prop, SenderAtSafepoint
 <1> Len(msg) = 0 BY LengthFacts DEF IntegrityI
-<1> SUFFICES ASSUME Len(Sent) = x
-             PROVE  Len(Sent) = x + Len(msg)
-    BY PTL
-<1> QED BY LengthFacts
+<1> Len(Sent) = x BY LengthFacts
+<1> BytesTransmitted >= x BY LengthFacts, BytesTransmittedEq
+<1> QED BY PTL
 
 =============================================================================
