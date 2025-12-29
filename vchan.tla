@@ -3166,6 +3166,61 @@ LEMMA Progress_send_steps ==
 <1> WF_vars(SenderFair) BY PTL DEF SenderFair, WSpec
 <1> QED BY <1>1, <1>2, <1>3, PTL DEF WSpec
 
+LEMMA SenderEventuallySafe == WSpec => []<>SenderAtSafepoint
+<1> DEFINE PC == pc[SenderWriteID]
+<1> SUFFICES ASSUME []WSpec
+             PROVE <>(\/ PC = "sender_ready"
+                      \/ PC = "sender_blocked"
+                      \/ PC = "Done")
+    BY PTL DEF WSpec, SenderAtSafepoint
+<1>1 PC = "sender_write" ~> PC = "sender_request_notify"
+    <2> Progress_send_steps_prop("sender_write") BY Progress_send_steps
+    <2> PC \in NextPC_send("sender_write") => PC = "sender_request_notify" BY DEF NextPC_send
+    <2> QED BY PTL DEF Progress_send_steps_prop
+<1>2 PC = "sender_request_notify" ~> PC = "sender_write_data" \/ PC = "sender_recheck_len"
+    <2> Progress_send_steps_prop("sender_request_notify") BY Progress_send_steps
+    <2> PC \in NextPC_send("sender_request_notify") =>
+        PC = "sender_write_data" \/ PC = "sender_recheck_len" BY DEF NextPC_send
+    <2> QED BY PTL DEF Progress_send_steps_prop
+<1>3 PC = "sender_recheck_len" ~> PC = "sender_write_data"
+    <2> Progress_send_steps_prop("sender_recheck_len") BY Progress_send_steps
+    <2> PC \in NextPC_send("sender_recheck_len") =>
+        PC = "sender_write_data" BY DEF NextPC_send
+    <2> QED BY PTL DEF Progress_send_steps_prop
+<1>4 PC = "sender_write_data" ~> PC = "sender_check_notify_data" \/ PC = "sender_blocked"
+    <2> Progress_send_steps_prop("sender_write_data") BY Progress_send_steps
+    <2> PC \in NextPC_send("sender_write_data") =>
+        PC = "sender_check_notify_data" \/ PC = "sender_blocked" BY DEF NextPC_send
+    <2> QED BY PTL DEF Progress_send_steps_prop
+<1>5 PC = "sender_check_notify_data" ~> PC = "sender_notify_data" \/ PC = "sender_ready" \/ PC = "sender_blocked"
+    <2> Progress_send_steps_prop("sender_check_notify_data") BY Progress_send_steps
+    <2> PC \in NextPC_send("sender_check_notify_data") =>
+        PC = "sender_notify_data" \/ PC = "sender_ready" \/ PC = "sender_blocked" BY DEF NextPC_send
+    <2> QED BY PTL DEF Progress_send_steps_prop
+<1>6 PC = "sender_notify_data" ~> PC = "sender_ready" \/ PC = "sender_blocked"
+    <2> Progress_send_steps_prop("sender_notify_data") BY Progress_send_steps
+    <2> PC \in NextPC_send("sender_notify_data") =>
+        PC = "sender_ready" \/ PC = "sender_blocked" BY DEF NextPC_send
+    <2> QED BY PTL DEF Progress_send_steps_prop
+<1>7 PC = "sender_check_recv_live" ~> PC = "sender_write" \/ PC = "Done"
+    <2> Progress_send_steps_prop("sender_check_recv_live") BY Progress_send_steps
+    <2> PC \in NextPC_send("sender_check_recv_live") =>
+        PC = "sender_write" \/ PC = "Done" BY DEF NextPC_send
+    <2> QED BY PTL DEF Progress_send_steps_prop
+<1> PCOK BY PTL DEF WSpec, I, IntegrityI
+<1> \/ PC = "sender_ready"
+    \/ PC = "sender_write"
+    \/ PC = "sender_request_notify"
+    \/ PC = "sender_recheck_len"
+    \/ PC = "sender_write_data"
+    \/ PC = "sender_check_notify_data"
+    \/ PC = "sender_notify_data"
+    \/ PC = "sender_blocked"
+    \/ PC = "sender_check_recv_live"
+    \/ PC = "Done"
+    BY DEF PCOK
+<1> QED BY PTL, <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, <1>7 DEF PCOK
+
 AlwaysWriteLimit_prop(n) == WSpec /\ WriteLimit >= n => [](WriteLimit >= n)
 LEMMA AlwaysWriteLimit ==
   ASSUME NEW n \in Nat
@@ -3201,7 +3256,21 @@ LEMMA BytesTransmittedMonotonic ==
         <3> QED BY SenderWritePrivate
     <2> QED BY DEF Next, vars
 <1> QED OBVIOUS
-    
+
+LEMMA AlwaysBytesTransmitted ==
+  ASSUME NEW n \in Nat, []IntegrityI, [][Next]_vars
+  PROVE  BytesTransmitted >= n => [](BytesTransmitted >= n)
+<1> TypeOK BY PTL DEF IntegrityI
+<1> BytesTransmitted \in Nat BY LengthFacts
+<1> [Next]_vars /\ BytesTransmitted >= n => (BytesTransmitted >= n)'
+    <2> SUFFICES ASSUME [Next]_vars,
+                        BytesTransmitted >= n
+                 PROVE  (BytesTransmitted >= n)'
+        OBVIOUS
+    <2> BytesTransmitted \in Nat /\ (BytesTransmitted \in Nat)' BY PTL
+    <2> QED BY BytesTransmittedMonotonic
+<1> QED BY PTL
+
 (* We are within i bytes of having written n bytes to the buffer. *)
 WDist(n, i) == WriteLimit >= n /\ BytesTransmitted + i >= n
 
@@ -3670,6 +3739,35 @@ COROLLARY I /\ [][Next]_vars => WriteLimitCorrect
 <1> QED BY PTL DEF WriteLimitCorrect
 
 -----------------------------------------------------------------------------
+
+(* If WriteLimit says we'll transmit some data, it will also be received:
+   1. If WriteLimit says we'll transmit some data, then we will.
+   2. Eventually the sender will be at a safe point after that.
+   3. Once the sender is at a safepoint, the receiver will get all the data. *)
+LEMMA EndToEndLive ==
+  ASSUME NEW n \in Nat, []ReceiverLive, []CleanShutdownI
+  PROVE  ISpec => WriteLimit = n ~> Len(Got) >= n
+<1> ISpec => WSpec BY PTL DEF ISpec, WSpec, SenderFair, CleanShutdownI
+<1> SUFFICES ASSUME []ISpec, []WSpec, []IntegrityI, [][Next]_vars
+              PROVE WriteLimit = n ~> Len(Got) >= n
+    BY PTL DEF ISpec, WSpec, I
+<1> ISpec /\ WSpec /\ I /\ []CleanShutdownI /\ []ReceiverLive BY PTL DEF WSpec
+<1>1 WriteLimit = n => [](WriteLimit >= n)
+    <2> WriteLimit = n => WriteLimit >= n BY WriteLimitType
+    <2> AlwaysWriteLimit_prop(n) BY AlwaysWriteLimit
+    <2> QED BY PTL DEF AlwaysWriteLimit_prop
+<1>2 WriteLimit = n ~> BytesTransmitted >= n
+    <2> WriterLive_prop(n) BY WriterLive
+    <2> QED BY DEF WriterLive_prop
+<1>3 BytesTransmitted >= n => [](BytesTransmitted >= n) BY AlwaysBytesTransmitted
+<1>4 WSpec => []<>SenderAtSafepoint BY SenderEventuallySafe
+<1>5 SenderAtSafepoint /\ BytesTransmitted >= n ~> Len(Got) >= n
+    <2> ReaderLiveness_prop(n) BY ReaderLiveness
+    <2> SenderAtSafepoint /\ BytesTransmitted >= n ~> Len(Got) >= n \/ ~ReceiverLive
+        BY PTL DEF ReaderLiveness_prop
+    <2> Len(Got) >= n \/ ~ReceiverLive => Len(Got) >= n BY PTL
+    <2> QED BY PTL
+<1> QED BY PTL, <1>1, <1>2, <1>3, <1>4, <1>5
 
 THEOREM Spec => Availability
 <1> SUFFICES ASSUME []ISpec PROVE Availability BY SpecToISpec, PTL DEF ISpec
