@@ -721,19 +721,21 @@ CleanShutdownOnly == Len(msg) = 0 \/ SenderLive
 
 AvailabilityNat == Nat    \* Just to allow overriding it in TLC
 
-(* Any data that the write function reports has been sent successfully
-   (i.e. data in Sent when it is back at "sender_ready") will eventually
-   be received (if the receiver doesn't close the connection).
+(* If the sending application asks for n bytes to be sent
+   then eventually they will be received, provided that:
+   - The client doesn't shut down the connection before writing
+     all the data to the shared buffer, and
+   - The receiver doesn't decide to close the connection itself.
    In particular, this says that it's OK for the sender to close its
    end immediately after sending some data.
-   Note that this is not currently true of the C implementation.
-   TODO: should also check that the sender is able to reach this state in all cases. *)
+   Note that this is not currently true of the C implementation. *)
 Availability ==
-  \A x \in AvailabilityNat :
-    x = Len(Sent) /\ SenderLive /\ pc[SenderWriteID] = "sender_ready"
-      ~> \/ Len(Got) >= x
-         \/ ~ReceiverLive
-
+  /\ []CleanShutdownOnly
+  /\ []ReceiverLive
+  => \A n \in AvailabilityNat :
+        Len(Sent) = n ~>
+          Len(Got) >= n
+   
 (* If either side closes the connection, both end up in their Done state
    (or sender_ready, which is also outside the library). *)
 ShutdownOK ==
@@ -3894,32 +3896,26 @@ LEMMA SufficientSpace ==
 <1> QED BY PTL
 
 THEOREM Spec => Availability
-<1> SUFFICES ASSUME []ISpec PROVE Availability BY SpecToISpec, PTL DEF ISpec
+<1> SUFFICES ASSUME []ISpec, []CleanShutdownOnly, []ReceiverLive
+             PROVE Spec => \A n \in Nat : Len(Sent) = n ~> Len(Got) >= n
+    BY SpecToISpec, PTL DEF ISpec, Availability, AvailabilityNat
 <1> ISpec BY PTL DEF ISpec
 <1> I /\ IntegrityI /\ TypeOK /\ PCOK BY PTL DEF ISpec, I, IntegrityI
-<1> SUFFICES ASSUME NEW x \in Nat
-             PROVE  x = Len(Sent) /\ SenderLive /\ pc[SenderWriteID] = "sender_ready"
-                      ~> \/ Len(Got) >= x
-                         \/ ~ReceiverLive
-    BY DEF Availability, AvailabilityNat
-<1> SUFFICES ASSUME 
-         /\ SenderLive
-         /\ pc[SenderWriteID] = "sender_ready"
-         /\ Len(Sent) = x
-    PROVE <> \/ Len(Got) >= x
-             \/ ~ReceiverLive
-    <2> x = Len(Sent) => Len(Sent) = x OBVIOUS
-    <2> QED BY PTL
-<1> /\ SenderLive
-    /\ pc[SenderWriteID] = "sender_ready"
-    /\ BytesTransmitted >= x
-    ~> \/ Len(Got) >= x
-       \/ ~ReceiverLive
-   <2> ReaderLiveness_prop(x) BY ReaderLiveness
-   <2> QED BY PTL DEF ReaderLiveness_prop, SenderAtSafepoint
-<1> Len(msg) = 0 BY LengthFacts DEF IntegrityI
-<1> Len(Sent) = x BY LengthFacts
-<1> BytesTransmitted >= x BY LengthFacts, BytesTransmittedEq
+<1> SUFFICES ASSUME NEW n \in Nat, []CleanShutdownI
+             PROVE Len(Sent) = n ~> Len(Got) >= n
+    <2> Spec => []CleanShutdownI BY AlwaysCleanShutdownI DEF Spec
+    <2> QED OBVIOUS
+<1> Len(Sent) = n => [](Len(Sent) >= n)
+    <2> []I /\ [][Next]_vars BY PTL DEF ISpec
+    <2> AlwaysSent_prop(n) BY AlwaysSent
+    <2> QED BY DEF AlwaysSent_prop
+<1> EndToEndLive_prop(n) BY EndToEndLive
+<1> SUFFICES ASSUME [](Len(Sent) >= n)
+             PROVE  <>(Len(Got) >= n)
+    BY PTL
+<1> <>(WriteLimit >= n) BY PTL, SufficientSpace
+<1> <>(Len(Got) >= n)
+    <2> QED BY PTL DEF EndToEndLive_prop
 <1> QED BY PTL
 
 =============================================================================
