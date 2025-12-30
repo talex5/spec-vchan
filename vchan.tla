@@ -3770,6 +3770,129 @@ LEMMA EndToEndLive ==
     <2> QED BY PTL
 <1> QED BY PTL, <1>1, <1>2, <1>3, <1>4, <1>5
 
+(* If we've received n bytes but wanted to send more, then eventually
+   there will be space to send more. *)
+LEMMA EventuallySpace ==
+  ASSUME NEW n \in Nat,
+         []ReceiverLive, []CleanShutdownI,
+         [](Len(Got) >= n), [](Len(Sent) > n)
+  PROVE  ISpec => Len(Sent) > n /\ Len(Got) >= n ~> WriteLimit > n
+<1> SUFFICES ASSUME []ISpec, []RSpec
+              PROVE Len(Sent) > n /\ Len(Got) >= n ~> WriteLimit > n
+    BY PTL DEF ISpec, RSpec
+<1> [Next]_vars /\ I /\ CleanShutdownOnly /\ ReceiverLive BY PTL DEF ISpec, CleanShutdownI
+<1> IntegrityI /\ TypeOK BY DEF I, IntegrityI
+<1> USE LengthFacts
+<1> []<>ReceiverAtSafepoint BY PTL, ReceiverEventuallySafe
+<1> ReceiverAtSafepoint => WriteLimit > n
+    <2> SUFFICES ASSUME WriteLimit = Len(Got) + Min(BufferSize, Len(Buffer) + Len(msg))
+                 PROVE  WriteLimit > n
+        BY WriteAllIfReceiverSafe
+    <2> Len(Got) >= n BY PTL
+    <2> Len(Sent) > n BY PTL
+    <2> CASE Len(Got) > n BY DEF Min
+    <2> CASE Len(Got) = n
+        <3> SUFFICES BytesTransmitted + Len(msg) > Len(Got) BY DEF Min
+        <3> SUFFICES Len(Sent) > n BY BytesTransmittedEq
+        <3> QED OBVIOUS
+    <2> QED OBVIOUS
+<1> QED BY PTL
+
+AlwaysSent_prop(n) == Len(Sent) >= n => [](Len(Sent) >= n)
+LEMMA AlwaysSent ==
+  ASSUME NEW n \in Nat, []I, [][Next]_vars
+  PROVE  AlwaysSent_prop(n)
+<1> IntegrityI /\ TypeOK BY PTL DEF I, IntegrityI
+<1> USE LengthFacts
+<1> DEFINE X == Len(Sent) >= n
+<1> X /\ [Next]_vars => X'
+    <2> SUFFICES ASSUME X, [Next]_vars
+                 PROVE X'
+        OBVIOUS
+    <2> QED BY MonotonicLenSent
+<1> QED BY PTL DEF AlwaysSent_prop
+
+(* WriteLimit will always increase as long as there is more data to be sent:
+   - If WriteLimit is n then eventually n bytes will have been received.
+   - If n bytes have been received, then eventually WriteLimit will be greater than n. *)
+AlwaysMoreSpace_prop(n) == ISpec /\ [](Len(Sent) > n) => WriteLimit >= n ~> WriteLimit > n
+LEMMA AlwaysMoreSpace ==
+  ASSUME NEW n \in Nat, []ReceiverLive, []CleanShutdownI
+  PROVE  AlwaysMoreSpace_prop(n)
+<1> SUFFICES ASSUME []ISpec, [](Len(Sent) > n)
+              PROVE WriteLimit >= n ~> WriteLimit > n
+    BY PTL DEF ISpec, AlwaysMoreSpace_prop
+<1> [Next]_vars /\ I /\ CleanShutdownOnly /\ ReceiverLive BY PTL DEF ISpec, CleanShutdownI
+<1> IntegrityI /\ TypeOK BY DEF I, IntegrityI
+<1> USE LengthFacts
+<1> Len(Got) >= n => [](Len(Got) >= n)
+    <2> [Next]_vars /\ Len(Got) >= n => (Len(Got) >= n)'
+        <3> SUFFICES ASSUME [Next]_vars, Len(Got) >= n
+                     PROVE (Len(Got) >= n)'
+            OBVIOUS
+        <3> QED BY MonotonicLenGot
+    <2> QED BY PTL
+<1> WriteLimit >= n ~> Len(Got) >= n
+    <2> ISpec => EndToEndLive_prop(n) BY EndToEndLive
+    <2> QED BY PTL DEF EndToEndLive_prop
+<1> Len(Sent) > n /\ Len(Got) >= n ~> WriteLimit > n BY PTL, EventuallySpace
+<1> QED BY PTL
+
+(* If the application wants so send n bytes then eventually WriteLimit will
+   predict that we will send them.
+   This is simply by induction over AlwaysMoreSpace. *)
+LEMMA SufficientSpace ==
+  ASSUME NEW n \in Nat, []ReceiverLive, []CleanShutdownI
+  PROVE  ISpec => Len(Sent) >= n ~> WriteLimit >= n
+<1> SUFFICES ASSUME []ISpec
+             PROVE Len(Sent) >= n ~> WriteLimit >= n
+    BY PTL DEF ISpec
+<1> SUFFICES ASSUME [](Len(Sent) >= n)
+             PROVE <>(WriteLimit >= n)
+    <2> []I /\ [][Next]_vars BY PTL DEF ISpec
+    <2> AlwaysSent_prop(n) BY AlwaysSent DEF ISpec
+    <2> Len(Sent) >= n => [](Len(Sent) >= n) BY PTL DEF AlwaysSent_prop
+    <2> QED BY PTL, AlwaysSent
+<1> I /\ TypeOK BY PTL DEF ISpec, I, IntegrityI
+<1> USE LengthFacts
+<1> ISpec /\ WSpec BY PTL DEF WSpec, ISpec, CleanShutdownI, SenderFair
+<1> DEFINE R(i) == n >= i ~> WriteLimit >= i
+<1>1 R(0)
+    <2> WriteLimit >= 0 BY WriteLimitType
+    <2> QED BY PTL
+<1>2 ASSUME NEW i \in Nat PROVE R(i) => R(i+1)
+    <2> SUFFICES ASSUME []R(i) PROVE R(i+1) BY PTL
+    <2> R(i) BY PTL
+    <2> ASSUME ~(n >= i+1) PROVE R(i + 1) BY PTL (* Limit of what we wanted to prove. *)
+    <2> ASSUME n >= i+1 PROVE R(i + 1)
+        <3> n >= i ~> WriteLimit >= i OBVIOUS   (* We know writing i bytes works by induction *)
+        <3> WriteLimit >= i => [](WriteLimit >= i)
+            <4> AlwaysWriteLimit_prop(i) BY AlwaysWriteLimit
+            <4> QED BY PTL DEF AlwaysWriteLimit_prop
+        <3> [](Len(Sent) > i)
+            <4> Len(Sent) >= n BY PTL
+            <4> Len(Sent) > i OBVIOUS
+            <4> []I /\ [][Next]_vars BY PTL DEF ISpec
+            <4> AlwaysSent_prop(i+1) BY AlwaysSent
+            <4> Len(Sent) >= i + 1  <=> Len(Sent) > i OBVIOUS 
+            <4> QED BY PTL DEF AlwaysSent_prop
+        <3> Len(Sent) > i /\ WriteLimit >= i ~> WriteLimit > i
+            <4> AlwaysMoreSpace_prop(i) BY AlwaysMoreSpace
+            <4> QED BY PTL DEF AlwaysMoreSpace_prop
+        <3> WriteLimit > i => WriteLimit >= i + 1  BY WriteLimitType
+        <3> n >= i OBVIOUS
+        <3> QED BY PTL
+    <2> QED OBVIOUS
+<1>3 \A i \in Nat : R(i)
+    <2> HIDE DEF R
+    <2> QED BY NatInduction, Isa, <1>1, <1>2
+<1> R(n)
+    <2> HIDE DEF R
+    <2> QED BY <1>3
+<1> n >= n OBVIOUS
+<1> n >= n ~> WriteLimit >= n OBVIOUS
+<1> QED BY PTL
+
 THEOREM Spec => Availability
 <1> SUFFICES ASSUME []ISpec PROVE Availability BY SpecToISpec, PTL DEF ISpec
 <1> ISpec BY PTL DEF ISpec
