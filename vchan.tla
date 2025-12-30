@@ -2444,10 +2444,12 @@ LEMMA ReadLimitProgress ==
 
 (* If ReadLimit says we can read up to the first n bytes,
    then we will eventually read at least that many. *)
+ReadLimitEventually_prop(n) == RSpec /\ ReadLimit >= n ~> Len(Got) >= n
 LEMMA ReadLimitEventually ==
   ASSUME NEW n \in Nat
-  PROVE  RSpec /\ ReadLimit >= n ~> Len(Got) >= n
-<2> SUFFICES ASSUME []RSpec, [](ReadLimit >= n) PROVE <>(Len(Got) >= n) BY PTL, ReadLimitAlwaysMonotonic DEF RSpec
+  PROVE  ReadLimitEventually_prop(n)
+<2> SUFFICES ASSUME []RSpec, [](ReadLimit >= n) PROVE <>(Len(Got) >= n)
+    BY PTL, ReadLimitAlwaysMonotonic DEF RSpec, ReadLimitEventually_prop
 <2> RSpec /\ ReadLimit >= n BY PTL DEF RSpec
 <2> DEFINE R(i) == RDist(n, i) ~> RDist(n, 0)
 <2>b R(0) BY PTL
@@ -2494,7 +2496,7 @@ LEMMA ReadLimitISpec ==
 <1> DEFINE G == ReadLimit >= n ~> Len(Got) >= n \/ ~ReceiverLive
 <1> SUFFICES ASSUME []ISpec PROVE G BY PTL DEF ISpec
 <1> (<>~ReceiverLive) \/ RSpec BY PTL DEF ISpec, RSpec
-<1> RSpec => G BY ReadLimitEventually, PTL DEF RSpec
+<1> RSpec => G BY ReadLimitEventually, PTL DEF RSpec, ReadLimitEventually_prop
 <1> (<>~ReceiverLive) => G
     <2> SUFFICES ASSUME <>~ReceiverLive PROVE G OBVIOUS
     <2> <>[]~ReceiverLive BY ReceiverLiveFinal, PTL DEF ISpec
@@ -2504,23 +2506,21 @@ LEMMA ReadLimitISpec ==
 (* When the sender is waiting, the receiver will get everything in the buffer.
    This eliminates ReadLimit and anything about the state of the receiver thread. *)
 ReaderLiveness_prop(n) ==
-     /\ ISpec
+     /\ RSpec
      /\ SenderLive \/ CleanShutdownI
      /\ SenderAtSafepoint
      /\ BytesTransmitted >= n        (* If we've sent n bytes in total... *)
-     ~> \/ Len(Got) >= n             (* then at least n bytes will eventually be received. *)
-        \/ ~ReceiverLive
+     ~> Len(Got) >= n                (* then at least n bytes will eventually be received. *)
 LEMMA ReaderLiveness == 
   ASSUME NEW n \in Nat
   PROVE ReaderLiveness_prop(n)
-<1> SUFFICES ASSUME []ReceiverLive,
-                    []ISpec
+<1> SUFFICES ASSUME []RSpec
              PROVE  /\ SenderLive \/ CleanShutdownI
                     /\ SenderAtSafepoint
                     /\ BytesTransmitted >= n
                     ~> Len(Got) >= n
-    BY PTL, ReceiverLiveFinal DEF ISpec, ReaderLiveness_prop
-<1> I BY PTL DEF ISpec, I
+    BY PTL DEF RSpec, ReaderLiveness_prop
+<1> I BY PTL DEF RSpec, I
 <1> ReceiverLive /\ (SenderLive \/ CleanShutdownI) /\ SenderAtSafepoint
     => ReadLimit = Len(Got) + Len(Buffer)
     <2> SUFFICES ASSUME ReceiverLive, SenderAtSafepoint,
@@ -2552,14 +2552,45 @@ LEMMA ReaderLiveness ==
         <3> Len(Buffer) = 0 BY DEF CleanShutdownI
         <3> QED OBVIOUS
     <2> QED BY DEF PCOK, ReadLimit, TypeOK
-<1> SUFFICES ASSUME ISpec, I, ReceiverLive,
+<1> SUFFICES ASSUME RSpec, I, ReceiverLive,
                     SenderLive \/ CleanShutdownI,
                     SenderAtSafepoint,
                     BytesTransmitted >= n
              PROVE  <>(Len(Got) >= n)
-   BY PTL
+   BY PTL DEF RSpec
 <1> BytesTransmitted >= n => ReadLimit >= n OBVIOUS
-<1> QED BY PTL, ReadLimitISpec
+<1> QED BY PTL, ReadLimitEventually DEF ReadLimitEventually_prop
+
+(* ReadLimitEventually is the main result, but let's prove the old ReadLimitCorrect too. *)
+COROLLARY Init /\ [][Next]_vars => ReadLimitCorrect
+<1> SUFFICES ASSUME []I, [][Next]_vars
+             PROVE  ReadLimitCorrect
+    BY PTL, AlwaysI DEF ISpec
+<1> DEFINE A(i) == ReadLimit = i ~> Len(Got) >= i \/ ~ReceiverLive
+<1> WF_vars(ReceiverRead) => \A i \in AvailabilityNat : A(i)
+    <2> SUFFICES ASSUME WF_vars(ReceiverRead) PROVE \A i \in Nat : A(i)
+        BY PTL DEF AvailabilityNat
+    <2> SUFFICES ASSUME NEW i \in Nat PROVE A(i) OBVIOUS
+    <2>1 ~[]ReceiverLive => ReadLimit = i ~> ~ReceiverLive BY PTL, ReceiverLiveFinal
+    <2>2  []ReceiverLive => ReadLimit = i ~> Len(Got) >= i
+        <3> SUFFICES ASSUME []RSpec PROVE ReadLimit = i ~> Len(Got) >= i
+            BY PTL DEF RSpec
+        <3> ReadLimitEventually_prop(i) BY ReadLimitEventually
+        <3> TypeOK BY PTL DEF I, IntegrityI
+        <3> ReadLimit = i => ReadLimit >= i BY LengthFacts
+        <3> QED BY PTL DEF ReadLimitEventually_prop
+    <2> QED BY PTL, <2>1, <2>2
+<1> [][ReadLimit' >= ReadLimit \/ ~ReceiverLive]_vars
+    <2> SUFFICES ASSUME I, [Next]_vars
+                 PROVE  ReadLimit' >= ReadLimit \/ ~ReceiverLive
+        BY PTL
+    <2> QED BY ReadLimitMonotonic
+<1> [][ReceiverRead => UNCHANGED ReadLimit \/ ~ReceiverLive]_vars
+    <2> SUFFICES ASSUME I, ReceiverRead
+                 PROVE  UNCHANGED ReadLimit \/ ~ReceiverLive
+        BY PTL
+    <2> QED BY ReceiverReadPreservesReadLimit
+<1> QED BY PTL DEF ReadLimitCorrect, AvailabilityNat
 
 -----------------------------------------------------------------------------
 
@@ -3752,6 +3783,7 @@ LEMMA EndToEndLive ==
   ASSUME NEW n \in Nat, []ReceiverLive, []CleanShutdownI
   PROVE  ISpec => EndToEndLive_prop(n)
 <1> ISpec => WSpec BY PTL DEF ISpec, WSpec, SenderFair, CleanShutdownI
+<1> ISpec => RSpec BY PTL DEF ISpec, RSpec
 <1> SUFFICES ASSUME []ISpec, []WSpec, []IntegrityI, [][Next]_vars
               PROVE WriteLimit >= n ~> Len(Got) >= n
     BY PTL DEF ISpec, WSpec, I, EndToEndLive_prop
