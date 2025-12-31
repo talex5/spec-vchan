@@ -61,6 +61,7 @@ This specification is organised as follows:
 5. Inductive invariants for Integrity and deadlock freedom.
 6. Proofs of the above.
 7. Some additional proofs (`ReadLimit` and `WriteLimit`).
+8. Proof of Availability.
 
 -- Thomas Leonard, 2018
 
@@ -3810,9 +3811,9 @@ LEMMA EventuallySpace ==
   ASSUME NEW n \in Nat,
          []ReceiverLive, []CleanShutdownI,
          [](Len(Got) >= n), [](Len(Sent) > n)
-  PROVE  ISpec => Len(Sent) > n /\ Len(Got) >= n ~> WriteLimit > n
+  PROVE  ISpec ~> WriteLimit > n
 <1> SUFFICES ASSUME []ISpec, []RSpec
-              PROVE Len(Sent) > n /\ Len(Got) >= n ~> WriteLimit > n
+              PROVE <>(WriteLimit > n)
     BY PTL DEF ISpec, RSpec
 <1> [Next]_vars /\ I /\ CleanShutdownOnly /\ ReceiverLive BY PTL DEF ISpec, CleanShutdownI
 <1> IntegrityI /\ TypeOK BY DEF I, IntegrityI
@@ -3872,7 +3873,7 @@ LEMMA AlwaysMoreSpace ==
 <1> Len(Sent) > n /\ Len(Got) >= n ~> WriteLimit > n BY PTL, EventuallySpace
 <1> QED BY PTL
 
-(* If the application wants so send n bytes then eventually WriteLimit will
+(* If the application wants to send n bytes then eventually WriteLimit will
    predict that we will send them.
    This is simply by induction over AlwaysMoreSpace. *)
 LEMMA SufficientSpace ==
