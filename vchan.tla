@@ -1696,19 +1696,6 @@ THEOREM DeadlockFree2 ==
     <2> QED OBVIOUS
 <1> QED OBVIOUS
 
-(* A more useful version of Spec for use in temporal proofs.
-   It replaces Init with []I. *)
-ISpec ==
-  /\ [][Next]_vars
-  /\ []I
-  /\ WF_vars((pc[SenderWriteID] # "sender_ready") /\ SenderWrite)
-  /\ WF_vars((pc[SenderCloseID] # "sender_open") /\ SenderClose)
-  /\ WF_vars(ReceiverRead)
-  /\ WF_vars((pc[ReceiverCloseID] # "recv_open") /\ ReceiverClose)
-
-THEOREM SpecToISpec == Spec => ISpec
-BY AlwaysI DEF Spec, ISpec
-
 BytesTransmitted == Len(Got) + Len(Buffer)
 USE DEF BytesTransmitted
 
@@ -2010,11 +1997,15 @@ THEOREM ReadLimitMonotonic ==
 <1>6. CASE UNCHANGED vars BY <1>6 DEF ReadLimit, vars
 <1> QED BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6 DEF Next
 
-(* Like ISpec, but ensures reader doesn't close the connection (we can't prove
-   much if it does) and it only requires fairness of the receiver. *)
+(* Like Spec, but uses []I instead of Init so that
+   proofs using RSpec are valid from any point,
+   not just the start of the algorithm.
+   It also ensures the reader doesn't close the connection
+   (we can't prove much if it does), and only requires
+   fairness of the receiver. *)
 RSpec ==
-  /\ [][Next]_vars
   /\ []I
+  /\ [][Next]_vars
   /\ []ReceiverLive
   /\ WF_vars(ReceiverRead)
 
@@ -2489,21 +2480,6 @@ LEMMA ReceiverLiveFinal ==
     <2> QED OBVIOUS
 <1> QED BY PTL DEF Spec
 
-(* Like ReadLimitEventually, but in terms of ISpec rather than RSpec. *)
-LEMMA ReadLimitISpec ==
-    ASSUME NEW n \in Nat
-    PROVE  ISpec /\ ReadLimit >= n ~> \/ Len(Got) >= n
-                                      \/ ~ReceiverLive
-<1> DEFINE G == ReadLimit >= n ~> Len(Got) >= n \/ ~ReceiverLive
-<1> SUFFICES ASSUME []ISpec PROVE G BY PTL DEF ISpec
-<1> (<>~ReceiverLive) \/ RSpec BY PTL DEF ISpec, RSpec
-<1> RSpec => G BY ReadLimitEventually, PTL DEF RSpec, ReadLimitEventually_prop
-<1> (<>~ReceiverLive) => G
-    <2> SUFFICES ASSUME <>~ReceiverLive PROVE G OBVIOUS
-    <2> <>[]~ReceiverLive BY ReceiverLiveFinal, PTL DEF ISpec
-    <2> QED BY PTL
-<1> QED BY PTL
-
 (* When the sender is waiting, the receiver will get everything in the buffer.
    This eliminates ReadLimit and anything about the state of the receiver thread. *)
 ReaderLiveness_prop(n) ==
@@ -2566,7 +2542,7 @@ LEMMA ReaderLiveness ==
 COROLLARY Init /\ [][Next]_vars => ReadLimitCorrect
 <1> SUFFICES ASSUME []I, [][Next]_vars
              PROVE  ReadLimitCorrect
-    BY PTL, AlwaysI DEF ISpec
+    BY PTL, AlwaysI
 <1> DEFINE A(i) == ReadLimit = i ~> Len(Got) >= i \/ ~ReceiverLive
 <1> WF_vars(ReceiverRead) => \A i \in AvailabilityNat : A(i)
     <2> SUFFICES ASSUME WF_vars(ReceiverRead) PROVE \A i \in Nat : A(i)
@@ -2614,14 +2590,14 @@ WriteLimit ==
    starts to send something it must continue. *)
 SenderFair == pc[SenderWriteID] # "sender_ready" /\ SenderWrite
 
-(* A modified version of ISpec for proving WriteLimit facts.
+(* Similar to RSpec, but for proving WriteLimit facts.
    It only requires fairness of the sender, requires the
    receiver to stay live (otherwise we can't prove much),
    and requires that the client doesn't give up while trying
    to send something. *)
 WSpec ==
-  /\ [][Next]_vars
   /\ []I
+  /\ [][Next]_vars
   /\ WF_vars(SenderFair)
   /\ []ReceiverLive
   /\ []CleanShutdownOnly
@@ -3781,14 +3757,12 @@ COROLLARY I /\ [][Next]_vars => WriteLimitCorrect
    3. Once the sender is at a safepoint, the receiver will get all the data. *)
 EndToEndLive_prop(n) == WriteLimit >= n ~> Len(Got) >= n
 LEMMA EndToEndLive ==
-  ASSUME NEW n \in Nat, []ReceiverLive, []CleanShutdownI
-  PROVE  ISpec => EndToEndLive_prop(n)
-<1> ISpec => WSpec BY PTL DEF ISpec, WSpec, SenderFair, CleanShutdownI
-<1> ISpec => RSpec BY PTL DEF ISpec, RSpec
-<1> SUFFICES ASSUME []ISpec, []WSpec, []IntegrityI, [][Next]_vars
+  ASSUME NEW n \in Nat, []WSpec, []RSpec, []CleanShutdownI
+  PROVE  EndToEndLive_prop(n)
+<1> SUFFICES ASSUME []IntegrityI, [][Next]_vars
               PROVE WriteLimit >= n ~> Len(Got) >= n
-    BY PTL DEF ISpec, WSpec, I, EndToEndLive_prop
-<1> ISpec /\ WSpec /\ I /\ []CleanShutdownI /\ []ReceiverLive BY PTL DEF WSpec
+    BY PTL DEF WSpec, I, EndToEndLive_prop
+<1> RSpec /\ WSpec /\ I /\ []ReceiverLive BY PTL DEF WSpec, RSpec
 <1>1 WriteLimit >= n => [](WriteLimit >= n)
     <2> AlwaysWriteLimit_prop(n) BY AlwaysWriteLimit
     <2> QED BY PTL DEF AlwaysWriteLimit_prop
@@ -3809,13 +3783,10 @@ LEMMA EndToEndLive ==
    there will be space to send more. *)
 LEMMA EventuallySpace ==
   ASSUME NEW n \in Nat,
-         []ReceiverLive, []CleanShutdownI,
+         []WSpec, []RSpec, []CleanShutdownI,
          [](Len(Got) >= n), [](Len(Sent) > n)
-  PROVE  ISpec ~> WriteLimit > n
-<1> SUFFICES ASSUME []ISpec, []RSpec
-              PROVE <>(WriteLimit > n)
-    BY PTL DEF ISpec, RSpec
-<1> [Next]_vars /\ I /\ CleanShutdownOnly /\ ReceiverLive BY PTL DEF ISpec, CleanShutdownI
+  PROVE  <>(WriteLimit > n)
+<1> [Next]_vars /\ I /\ CleanShutdownOnly /\ ReceiverLive BY PTL DEF WSpec, CleanShutdownI
 <1> IntegrityI /\ TypeOK BY DEF I, IntegrityI
 <1> USE LengthFacts
 <1> []<>ReceiverAtSafepoint BY PTL, ReceiverEventuallySafe
@@ -3850,14 +3821,14 @@ LEMMA AlwaysSent ==
 (* WriteLimit will always increase as long as there is more data to be sent:
    - If WriteLimit is n then eventually n bytes will have been received.
    - If n bytes have been received, then eventually WriteLimit will be greater than n. *)
-AlwaysMoreSpace_prop(n) == ISpec /\ [](Len(Sent) > n) => WriteLimit >= n ~> WriteLimit > n
+AlwaysMoreSpace_prop(n) == [](Len(Sent) > n) => WriteLimit >= n ~> WriteLimit > n
 LEMMA AlwaysMoreSpace ==
-  ASSUME NEW n \in Nat, []ReceiverLive, []CleanShutdownI
+  ASSUME NEW n \in Nat, []RSpec, []WSpec, []CleanShutdownI
   PROVE  AlwaysMoreSpace_prop(n)
-<1> SUFFICES ASSUME []ISpec, [](Len(Sent) > n)
-              PROVE WriteLimit >= n ~> WriteLimit > n
-    BY PTL DEF ISpec, AlwaysMoreSpace_prop
-<1> [Next]_vars /\ I /\ CleanShutdownOnly /\ ReceiverLive BY PTL DEF ISpec, CleanShutdownI
+<1> SUFFICES ASSUME [](Len(Sent) > n)
+             PROVE  WriteLimit >= n ~> WriteLimit > n
+    BY PTL DEF AlwaysMoreSpace_prop
+<1> [Next]_vars /\ I /\ CleanShutdownOnly /\ ReceiverLive BY PTL DEF WSpec, CleanShutdownI
 <1> IntegrityI /\ TypeOK BY DEF I, IntegrityI
 <1> USE LengthFacts
 <1> Len(Got) >= n => [](Len(Got) >= n)
@@ -3868,7 +3839,7 @@ LEMMA AlwaysMoreSpace ==
         <3> QED BY MonotonicLenGot
     <2> QED BY PTL
 <1> WriteLimit >= n ~> Len(Got) >= n
-    <2> ISpec => EndToEndLive_prop(n) BY EndToEndLive
+    <2> EndToEndLive_prop(n) BY EndToEndLive
     <2> QED BY PTL DEF EndToEndLive_prop
 <1> Len(Sent) > n /\ Len(Got) >= n ~> WriteLimit > n BY PTL, EventuallySpace
 <1> QED BY PTL
@@ -3877,20 +3848,17 @@ LEMMA AlwaysMoreSpace ==
    predict that we will send them.
    This is simply by induction over AlwaysMoreSpace. *)
 LEMMA SufficientSpace ==
-  ASSUME NEW n \in Nat, []ReceiverLive, []CleanShutdownI
-  PROVE  ISpec => Len(Sent) >= n ~> WriteLimit >= n
-<1> SUFFICES ASSUME []ISpec
-             PROVE Len(Sent) >= n ~> WriteLimit >= n
-    BY PTL DEF ISpec
+  ASSUME NEW n \in Nat, []WSpec, []RSpec, []CleanShutdownI
+  PROVE  Len(Sent) >= n ~> WriteLimit >= n
 <1> SUFFICES ASSUME [](Len(Sent) >= n)
              PROVE <>(WriteLimit >= n)
-    <2> []I /\ [][Next]_vars BY PTL DEF ISpec
-    <2> AlwaysSent_prop(n) BY AlwaysSent DEF ISpec
+    <2> []I /\ [][Next]_vars BY PTL DEF WSpec
+    <2> AlwaysSent_prop(n) BY AlwaysSent
     <2> Len(Sent) >= n => [](Len(Sent) >= n) BY PTL DEF AlwaysSent_prop
     <2> QED BY PTL, AlwaysSent
-<1> I /\ TypeOK BY PTL DEF ISpec, I, IntegrityI
+<1> I /\ TypeOK BY PTL DEF WSpec, I, IntegrityI
 <1> USE LengthFacts
-<1> ISpec /\ WSpec BY PTL DEF WSpec, ISpec, CleanShutdownI, SenderFair
+<1> RSpec /\ WSpec BY PTL
 <1> DEFINE R(i) == n >= i ~> WriteLimit >= i
 <1>1 R(0)
     <2> WriteLimit >= 0 BY WriteLimitType
@@ -3907,7 +3875,7 @@ LEMMA SufficientSpace ==
         <3> [](Len(Sent) > i)
             <4> Len(Sent) >= n BY PTL
             <4> Len(Sent) > i OBVIOUS
-            <4> []I /\ [][Next]_vars BY PTL DEF ISpec
+            <4> []I /\ [][Next]_vars BY PTL DEF WSpec
             <4> AlwaysSent_prop(i+1) BY AlwaysSent
             <4> Len(Sent) >= i + 1  <=> Len(Sent) > i OBVIOUS 
             <4> QED BY PTL DEF AlwaysSent_prop
@@ -3929,17 +3897,17 @@ LEMMA SufficientSpace ==
 <1> QED BY PTL
 
 THEOREM Spec => Availability
-<1> SUFFICES ASSUME []ISpec, []CleanShutdownOnly, []ReceiverLive
+<1> SUFFICES ASSUME []RSpec, []WSpec, []CleanShutdownOnly, []ReceiverLive
              PROVE Spec => \A n \in Nat : Len(Sent) = n ~> Len(Got) >= n
-    BY SpecToISpec, PTL DEF ISpec, Availability, AvailabilityNat
-<1> ISpec BY PTL DEF ISpec
-<1> I /\ IntegrityI /\ TypeOK /\ PCOK BY PTL DEF ISpec, I, IntegrityI
+    BY PTL, AlwaysI DEF Spec, SenderFair, RSpec, WSpec, Availability, AvailabilityNat
+<1> WSpec /\ RSpec BY PTL
+<1> I /\ IntegrityI /\ TypeOK /\ PCOK BY PTL DEF WSpec, I, IntegrityI
 <1> SUFFICES ASSUME NEW n \in Nat, []CleanShutdownI
              PROVE Len(Sent) = n ~> Len(Got) >= n
     <2> Spec => []CleanShutdownI BY AlwaysCleanShutdownI DEF Spec
     <2> QED OBVIOUS
 <1> Len(Sent) = n => [](Len(Sent) >= n)
-    <2> []I /\ [][Next]_vars BY PTL DEF ISpec
+    <2> []I /\ [][Next]_vars BY PTL DEF WSpec
     <2> AlwaysSent_prop(n) BY AlwaysSent
     <2> QED BY DEF AlwaysSent_prop
 <1> EndToEndLive_prop(n) BY EndToEndLive
